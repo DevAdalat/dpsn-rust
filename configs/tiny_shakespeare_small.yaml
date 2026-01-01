@@ -1,0 +1,31 @@
+# Small DPSN model config for TinyShakespeare
+# Fast training for testing (~2-5 minutes on CPU)
+
+model:
+  embed_dim: 32
+  pool_size: 1000        # Small parameter pool
+  k_min: 10              # Select 10-100 params per token
+  k_max: 100
+  router_hidden_dim: 32
+  context_length: 32     # Short context window
+  exploration_noise: 0.1
+
+training:
+  num_steps: 3000
+  batch_size: 16
+  learning_rate: 0.003   # Slightly higher for small model
+  log_interval: 20
+  save_interval: 100
+  checkpoint_dir: checkpoints
+
+dataset:
+  source: tinyshakespeare
+  data_dir: data
+
+inference:
+  max_tokens: 100
+  temperature: 0.8
+  default_prompt: "ROMEO:"
+
+backend:
+  backend_type: ndarray

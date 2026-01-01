@@ -1,0 +1,22 @@
+[package]
+name = "dpsn"
+version = "0.1.0"
+edition = "2021"
+authors = ["Dev Kumar <devkumar011a@gmail.com>"]
+description = "Dynamic Parameter Selection Networks - Ultra-Fine-Grained Sparse Activation"
+
+[dependencies]
+burn = { version = "0.16", features = ["train", "wgpu", "ndarray", "candle"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+rand = "0.8"
+reqwest = { version = "0.12", features = ["blocking", "stream"] }
+clap = { version = "4.0", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+futures-util = "0.3"
+indicatif = "0.17"
+
+[profile.release]
+opt-level = 3
+lto = true
