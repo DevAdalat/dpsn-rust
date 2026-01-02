@@ -4,7 +4,7 @@ use burn::tensor::backend::Backend;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::model::dpsn::DPSN;
+use crate::model::dpsn::{HierarchicalDPSN, DPSN};
 
 pub type DefaultRecorder = NamedMpkFileRecorder<FullPrecisionSettings>;
 
@@ -34,6 +34,33 @@ pub fn load_checkpoint<B: Backend>(
     checkpoint_path: &Path,
     device: &B::Device,
 ) -> Result<DPSN<B>, RecorderError> {
+    let recorder = default_recorder();
+    let path_without_ext = checkpoint_path.with_extension("");
+    model.load_file(path_without_ext, &recorder, device)
+}
+
+pub fn save_hierarchical_checkpoint<B: Backend>(
+    model: &HierarchicalDPSN<B>,
+    checkpoint_dir: &Path,
+    step: usize,
+) -> Result<PathBuf, RecorderError> {
+    fs::create_dir_all(checkpoint_dir).map_err(|e| RecorderError::Unknown(e.to_string()))?;
+
+    let filename = format!("hdpsn_step_{}", step);
+    let path = checkpoint_dir.join(&filename);
+
+    let recorder = default_recorder();
+    model.clone().save_file(&path, &recorder)?;
+
+    println!("Saved hierarchical checkpoint: {}.mpk", path.display());
+    Ok(path)
+}
+
+pub fn load_hierarchical_checkpoint<B: Backend>(
+    model: HierarchicalDPSN<B>,
+    checkpoint_path: &Path,
+    device: &B::Device,
+) -> Result<HierarchicalDPSN<B>, RecorderError> {
     let recorder = default_recorder();
     let path_without_ext = checkpoint_path.with_extension("");
     model.load_file(path_without_ext, &recorder, device)

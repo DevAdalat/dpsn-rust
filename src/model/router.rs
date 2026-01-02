@@ -102,9 +102,12 @@ impl<B: Backend> Router<B> {
         let budget: Vec<usize> = complexity_vals
             .iter()
             .map(|&c| {
-                let c_squared = (c * c) as f64;
+                // Clamp complexity to prevent budget=0 which causes NaN
+                let c_clamped = c.max(0.01).min(1.0);
+                let c_squared = (c_clamped * c_clamped) as f64;
                 let k = self.k_min as f64 + (self.k_max - self.k_min) as f64 * c_squared;
-                k.floor() as usize
+                // Ensure minimum budget of 1 to prevent empty tensor operations
+                (k.floor() as usize).max(1)
             })
             .collect();
 

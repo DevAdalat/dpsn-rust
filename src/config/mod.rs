@@ -32,6 +32,12 @@ pub struct ModelConfig {
     pub context_length: usize,
     #[serde(default = "default_exploration_noise")]
     pub exploration_noise: f64,
+    #[serde(default)]
+    pub use_hierarchical_router: bool,
+    #[serde(default = "default_num_clusters")]
+    pub num_clusters: usize,
+    #[serde(default = "default_top_clusters")]
+    pub top_clusters: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +168,12 @@ fn default_context_length() -> usize {
 fn default_exploration_noise() -> f64 {
     0.1
 }
+fn default_num_clusters() -> usize {
+    32
+}
+fn default_top_clusters() -> usize {
+    4
+}
 fn default_num_steps() -> usize {
     500
 }
@@ -247,6 +259,9 @@ impl FullConfig {
                 router_hidden_dim: 128,
                 context_length: 64,
                 exploration_noise: 0.1,
+                use_hierarchical_router: false,
+                num_clusters: 32,
+                top_clusters: 4,
             },
             training: TrainingSettings {
                 num_steps: 500,
@@ -285,6 +300,9 @@ impl FullConfig {
                 router_hidden_dim: 64,
                 context_length: 32,
                 exploration_noise: 0.1,
+                use_hierarchical_router: false,
+                num_clusters: 32,
+                top_clusters: 4,
             },
             training: TrainingSettings {
                 num_steps: 100,
@@ -327,6 +345,9 @@ impl FullConfig {
                 router_hidden_dim: 128,
                 context_length: 128,
                 exploration_noise: 0.1,
+                use_hierarchical_router: true,
+                num_clusters: 64,
+                top_clusters: 8,
             },
             training: TrainingSettings {
                 num_steps: 1000,

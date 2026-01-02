@@ -1,3 +1,3 @@
 pub mod generator;
 
-pub use generator::TextGenerator;
+pub use generator::{HierarchicalTextGenerator, TextGenerator};

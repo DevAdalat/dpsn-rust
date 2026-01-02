@@ -1,6 +1,6 @@
-use burn::backend::candle::Candle;
+use burn::backend::candle::{Candle, CandleDevice};
 use burn::backend::ndarray::NdArray;
-use burn::backend::wgpu::Wgpu;
+use burn::backend::wgpu::{Wgpu, WgpuDevice};
 use burn::backend::Autodiff;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -10,8 +10,8 @@ use dpsn::data::{download_tiny_shakespeare, load_dataset_from_config, CharDatase
 use dpsn::inference::TextGenerator;
 use dpsn::model::DPSN;
 use dpsn::training::{
-    find_latest_checkpoint, load_checkpoint, train_with_curriculum, CurriculumConfig,
-    TrainingConfig,
+    find_latest_checkpoint, load_checkpoint, train_hierarchical, train_with_curriculum,
+    CurriculumConfig, TrainingConfig,
 };
 
 type NdArrayBackend = NdArray<f32>;
@@ -46,6 +46,40 @@ fn parse_backend(s: &str) -> BackendType {
         "candle" => BackendType::Candle,
         _ => BackendType::Ndarray,
     }
+}
+
+fn print_device_info(backend: BackendType) {
+    match backend {
+        BackendType::Ndarray => {
+            println!("Backend: NdArray (CPU)");
+            println!("  Accelerator: CPU (pure Rust, no hardware acceleration)");
+        }
+        BackendType::Wgpu => {
+            let device: WgpuDevice = Default::default();
+            let accel = match &device {
+                WgpuDevice::DiscreteGpu(idx) => format!("Discrete GPU #{}", idx),
+                WgpuDevice::IntegratedGpu(idx) => format!("Integrated GPU #{}", idx),
+                WgpuDevice::VirtualGpu(idx) => format!("Virtual GPU #{}", idx),
+                WgpuDevice::Cpu => "CPU (software rendering)".to_string(),
+                WgpuDevice::DefaultDevice => "Default GPU".to_string(),
+                _ => "WebGPU Device".to_string(),
+            };
+            println!("Backend: WGPU (WebGPU)");
+            println!("  Accelerator: {}", accel);
+            println!("  API: Vulkan/Metal/DX12 (auto-detected)");
+        }
+        BackendType::Candle => {
+            let device: CandleDevice = Default::default();
+            let accel = match &device {
+                CandleDevice::Cpu => "CPU".to_string(),
+                CandleDevice::Cuda(cuda_dev) => format!("CUDA GPU #{}", cuda_dev.index),
+                CandleDevice::Metal(metal_dev) => format!("Metal GPU #{}", metal_dev.index),
+            };
+            println!("Backend: Candle");
+            println!("  Accelerator: {}", accel);
+        }
+    }
+    println!();
 }
 
 #[derive(Parser)]
@@ -192,7 +226,7 @@ fn main() {
             if let Some(config_path) = config {
                 run_from_config(&config_path);
             } else {
-                println!("Using backend: {}\n", backend);
+                print_device_info(backend);
                 match backend {
                     BackendType::Ndarray => run_training::<NdArrayAutodiff>(
                         steps,
@@ -242,7 +276,7 @@ fn main() {
             if let Some(config_path) = config {
                 run_generate_from_config(&config_path, &prompt, checkpoint.as_deref());
             } else {
-                println!("Using backend: {}\n", backend);
+                print_device_info(backend);
                 match backend {
                     BackendType::Ndarray => run_generation::<NdArrayAutodiff>(
                         &prompt,
@@ -310,7 +344,7 @@ fn run_from_config(config_path: &str) {
     };
 
     let backend = parse_backend(&config.backend.backend_type);
-    println!("Using backend: {}\n", backend);
+    print_device_info(backend);
 
     match backend {
         BackendType::Ndarray => run_training_from_config::<NdArrayAutodiff>(&config),
@@ -331,7 +365,7 @@ fn run_generate_from_config(config_path: &str, prompt: &str, checkpoint: Option<
     };
 
     let backend = parse_backend(&config.backend.backend_type);
-    println!("Using backend: {}\n", backend);
+    print_device_info(backend);
 
     match backend {
         BackendType::Ndarray => {
@@ -390,30 +424,58 @@ fn run_training_from_config<B: burn::tensor::backend::AutodiffBackend>(config: &
 
     let device = Default::default();
 
-    let model = train_with_curriculum::<B>(
-        training_config,
-        curriculum_config,
-        dataset.vocab_size(),
-        config.model.embed_dim,
-        config.model.pool_size,
-        config.model.k_min,
-        config.model.k_max,
-        config.model.router_hidden_dim,
-        config.model.context_length,
-        config.model.exploration_noise,
-        &dataset,
-        &device,
-    );
+    if config.model.use_hierarchical_router {
+        println!("Using HIERARCHICAL router (reduced parameter count)\n");
+        let model = train_hierarchical::<B>(
+            training_config,
+            curriculum_config,
+            dataset.vocab_size(),
+            config.model.embed_dim,
+            config.model.pool_size,
+            config.model.k_min,
+            config.model.k_max,
+            config.model.num_clusters,
+            config.model.top_clusters,
+            config.model.context_length,
+            config.model.exploration_noise,
+            &dataset,
+            &device,
+        );
 
-    println!("\n=== Generation Sample ===\n");
+        println!("\n=== Generation Sample ===\n");
+        let generator =
+            dpsn::inference::HierarchicalTextGenerator::new(&model, &dataset.tokenizer, device);
+        let generated = generator.generate(
+            &config.inference.default_prompt,
+            config.inference.max_tokens,
+            config.inference.temperature,
+        );
+        println!("{}", generated);
+    } else {
+        let model = train_with_curriculum::<B>(
+            training_config,
+            curriculum_config,
+            dataset.vocab_size(),
+            config.model.embed_dim,
+            config.model.pool_size,
+            config.model.k_min,
+            config.model.k_max,
+            config.model.router_hidden_dim,
+            config.model.context_length,
+            config.model.exploration_noise,
+            &dataset,
+            &device,
+        );
 
-    let generator = TextGenerator::new(&model, &dataset.tokenizer, device);
-    let generated = generator.generate(
-        &config.inference.default_prompt,
-        config.inference.max_tokens,
-        config.inference.temperature,
-    );
-    println!("{}", generated);
+        println!("\n=== Generation Sample ===\n");
+        let generator = TextGenerator::new(&model, &dataset.tokenizer, device);
+        let generated = generator.generate(
+            &config.inference.default_prompt,
+            config.inference.max_tokens,
+            config.inference.temperature,
+        );
+        println!("{}", generated);
+    }
 }
 
 fn run_generate_with_config<B: burn::tensor::backend::AutodiffBackend>(
