@@ -40,7 +40,7 @@ impl<B: Backend> ExecutionEngine<B> {
 
         let weights_expanded = weights.unsqueeze_dim::<3>(2);
 
-        let aggregated = (w_active * weights_expanded).sum_dim(1).squeeze(1);
+        let aggregated: Tensor<B, 2> = (w_active * weights_expanded).sum_dim(1).squeeze();
 
         let combined = x + aggregated;
 

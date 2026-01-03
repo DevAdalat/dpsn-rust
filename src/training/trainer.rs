@@ -50,7 +50,7 @@ fn compute_auxiliary_losses<B: Backend>(
 ) -> AuxiliaryLosses<B> {
     let device = routing_probs.device();
 
-    let mean_probs: Tensor<B, 1> = routing_probs.clone().mean_dim(0).squeeze(0);
+    let mean_probs: Tensor<B, 1> = routing_probs.clone().mean_dim(0).squeeze();
     let balance_loss = mean_probs.powf_scalar(2.0).sum() * (pool_size as f32);
 
     let avg_budget: f32 = budget.iter().map(|&b| b as f32).sum::<f32>() / budget.len() as f32;

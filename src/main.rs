@@ -1,4 +1,5 @@
 use burn::backend::candle::{Candle, CandleDevice};
+use burn::backend::cuda::{Cuda, CudaDevice};
 use burn::backend::ndarray::NdArray;
 use burn::backend::wgpu::{Wgpu, WgpuDevice};
 use burn::backend::Autodiff;
@@ -23,11 +24,15 @@ type WgpuAutodiff = Autodiff<WgpuBackend>;
 type CandleBackend = Candle;
 type CandleAutodiff = Autodiff<CandleBackend>;
 
+type CudaBackend = Cuda;
+type CudaAutodiff = Autodiff<CudaBackend>;
+
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
 pub enum BackendType {
     Ndarray,
     Wgpu,
     Candle,
+    Cuda,
 }
 
 impl std::fmt::Display for BackendType {
@@ -36,6 +41,7 @@ impl std::fmt::Display for BackendType {
             BackendType::Ndarray => write!(f, "ndarray"),
             BackendType::Wgpu => write!(f, "wgpu"),
             BackendType::Candle => write!(f, "candle"),
+            BackendType::Cuda => write!(f, "cuda"),
         }
     }
 }
@@ -44,6 +50,7 @@ fn parse_backend(s: &str) -> BackendType {
     match s.to_lowercase().as_str() {
         "wgpu" => BackendType::Wgpu,
         "candle" => BackendType::Candle,
+        "cuda" => BackendType::Cuda,
         _ => BackendType::Ndarray,
     }
 }
@@ -77,6 +84,12 @@ fn print_device_info(backend: BackendType) {
             };
             println!("Backend: Candle");
             println!("  Accelerator: {}", accel);
+        }
+        BackendType::Cuda => {
+            let device: CudaDevice = Default::default();
+            println!("Backend: CUDA (CubeCL)");
+            println!("  Accelerator: NVIDIA GPU #{}", device.index);
+            println!("  API: CUDA via CubeCL JIT");
         }
     }
     println!();
@@ -178,9 +191,13 @@ fn print_backends() {
     println!("  candle   - GPU backend using Candle");
     println!("             Best for: macOS Metal, Linux/Windows CUDA");
     println!("             Speed: Fast (native Metal/CUDA acceleration)\n");
+    println!("  cuda     - GPU backend using CubeCL (NVIDIA CUDA)");
+    println!("             Best for: NVIDIA GPUs with native CUDA support");
+    println!("             Speed: Very Fast (CubeCL JIT compilation)\n");
     println!("Usage:");
     println!("  dpsn train --backend ndarray       # Train with CPU");
     println!("  dpsn train --backend wgpu          # Train with WebGPU");
+    println!("  dpsn train --backend cuda          # Train with CUDA (CubeCL)");
     println!("  dpsn train --config config.yaml    # Train from config file");
     println!("  dpsn run --config config.yaml      # Run full training from config");
     println!("  dpsn init-config --output my.yaml  # Generate example config\n");
@@ -261,6 +278,17 @@ fn main() {
                         context_length,
                         &data_dir,
                     ),
+                    BackendType::Cuda => run_training::<CudaAutodiff>(
+                        steps,
+                        batch_size,
+                        lr,
+                        pool_size,
+                        embed_dim,
+                        k_min,
+                        k_max,
+                        context_length,
+                        &data_dir,
+                    ),
                 }
             }
         }
@@ -299,6 +327,13 @@ fn main() {
                         &data_dir,
                         checkpoint.as_deref(),
                     ),
+                    BackendType::Cuda => run_generation::<CudaAutodiff>(
+                        &prompt,
+                        max_tokens,
+                        temperature,
+                        &data_dir,
+                        checkpoint.as_deref(),
+                    ),
                 }
             }
         }
@@ -308,6 +343,7 @@ fn main() {
                 BackendType::Ndarray => run_demo::<NdArrayAutodiff>(),
                 BackendType::Wgpu => run_demo::<WgpuAutodiff>(),
                 BackendType::Candle => run_demo::<CandleAutodiff>(),
+                BackendType::Cuda => run_demo::<CudaAutodiff>(),
             }
         }
     }
@@ -350,6 +386,7 @@ fn run_from_config(config_path: &str) {
         BackendType::Ndarray => run_training_from_config::<NdArrayAutodiff>(&config),
         BackendType::Wgpu => run_training_from_config::<WgpuAutodiff>(&config),
         BackendType::Candle => run_training_from_config::<CandleAutodiff>(&config),
+        BackendType::Cuda => run_training_from_config::<CudaAutodiff>(&config),
     }
 }
 
@@ -375,6 +412,7 @@ fn run_generate_from_config(config_path: &str, prompt: &str, checkpoint: Option<
         BackendType::Candle => {
             run_generate_with_config::<CandleAutodiff>(&config, prompt, checkpoint)
         }
+        BackendType::Cuda => run_generate_with_config::<CudaAutodiff>(&config, prompt, checkpoint),
     }
 }
 
