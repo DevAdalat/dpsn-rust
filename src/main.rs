@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use dpsn::config::FullConfig;
 use dpsn::data::{download_tiny_shakespeare, load_dataset_from_config, CharDataset};
 use dpsn::inference::TextGenerator;
-use dpsn::model::DPSN;
+use dpsn::model::{DeviceLocation, DPSN};
 use dpsn::training::{
     find_latest_checkpoint, load_checkpoint, train_hierarchical, train_with_curriculum,
     CurriculumConfig, TrainingConfig,
@@ -55,11 +55,34 @@ fn parse_backend(s: &str) -> BackendType {
     }
 }
 
+fn backend_to_device_location(backend: BackendType) -> DeviceLocation {
+    match backend {
+        BackendType::Ndarray => DeviceLocation::AllCpu,
+        BackendType::Wgpu | BackendType::Candle | BackendType::Cuda => DeviceLocation::AllGpu,
+    }
+}
+
 fn print_device_info(backend: BackendType) {
     match backend {
         BackendType::Ndarray => {
-            println!("Backend: NdArray (CPU)");
-            println!("  Accelerator: CPU (pure Rust, no hardware acceleration)");
+            println!(
+                "╔══════════════════════════════════════════════════════════════════════════════╗"
+            );
+            println!(
+                "║                              BACKEND: NdArray (CPU)                          ║"
+            );
+            println!(
+                "╠══════════════════════════════════════════════════════════════════════════════╣"
+            );
+            println!(
+                "║  Accelerator:  CPU (pure Rust, no hardware acceleration)                     ║"
+            );
+            println!(
+                "║  Memory:       System RAM                                                    ║"
+            );
+            println!(
+                "╚══════════════════════════════════════════════════════════════════════════════╝"
+            );
         }
         BackendType::Wgpu => {
             let device: WgpuDevice = Default::default();
@@ -71,9 +94,23 @@ fn print_device_info(backend: BackendType) {
                 WgpuDevice::DefaultDevice => "Default GPU".to_string(),
                 _ => "WebGPU Device".to_string(),
             };
-            println!("Backend: WGPU (WebGPU)");
-            println!("  Accelerator: {}", accel);
-            println!("  API: Vulkan/Metal/DX12 (auto-detected)");
+            println!(
+                "╔══════════════════════════════════════════════════════════════════════════════╗"
+            );
+            println!(
+                "║                              BACKEND: WGPU (WebGPU)                          ║"
+            );
+            println!(
+                "╠══════════════════════════════════════════════════════════════════════════════╣"
+            );
+            println!("║  Accelerator:  {:<60} ║", accel);
+            println!(
+                "║  API:          Vulkan/Metal/DX12 (auto-detected)                             ║"
+            );
+            print_gpu_memory_info();
+            println!(
+                "╚══════════════════════════════════════════════════════════════════════════════╝"
+            );
         }
         BackendType::Candle => {
             let device: CandleDevice = Default::default();
@@ -82,17 +119,109 @@ fn print_device_info(backend: BackendType) {
                 CandleDevice::Cuda(cuda_dev) => format!("CUDA GPU #{}", cuda_dev.index),
                 CandleDevice::Metal(metal_dev) => format!("Metal GPU #{}", metal_dev.index),
             };
-            println!("Backend: Candle");
-            println!("  Accelerator: {}", accel);
+            println!(
+                "╔══════════════════════════════════════════════════════════════════════════════╗"
+            );
+            println!(
+                "║                              BACKEND: Candle                                 ║"
+            );
+            println!(
+                "╠══════════════════════════════════════════════════════════════════════════════╣"
+            );
+            println!("║  Accelerator:  {:<60} ║", accel);
+            print_gpu_memory_info();
+            println!(
+                "╚══════════════════════════════════════════════════════════════════════════════╝"
+            );
         }
         BackendType::Cuda => {
             let device: CudaDevice = Default::default();
-            println!("Backend: CUDA (CubeCL)");
-            println!("  Accelerator: NVIDIA GPU #{}", device.index);
-            println!("  API: CUDA via CubeCL JIT");
+            println!(
+                "╔══════════════════════════════════════════════════════════════════════════════╗"
+            );
+            println!(
+                "║                              BACKEND: CUDA (CubeCL)                          ║"
+            );
+            println!(
+                "╠══════════════════════════════════════════════════════════════════════════════╣"
+            );
+            println!(
+                "║  Accelerator:  NVIDIA GPU #{}                                                 ║",
+                device.index
+            );
+            println!(
+                "║  API:          CUDA via CubeCL JIT                                           ║"
+            );
+            print_cuda_memory_info(device.index as i32);
+            println!(
+                "╚══════════════════════════════════════════════════════════════════════════════╝"
+            );
         }
     }
     println!();
+}
+
+fn print_gpu_memory_info() {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(output) = std::process::Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=memory.total,memory.free,memory.used",
+                "--format=csv,noheader,nounits",
+            ])
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(s) = String::from_utf8(output.stdout) {
+                    let parts: Vec<&str> = s.trim().split(',').map(|s| s.trim()).collect();
+                    if parts.len() >= 3 {
+                        let total = parts[0].parse::<u64>().unwrap_or(0);
+                        let free = parts[1].parse::<u64>().unwrap_or(0);
+                        let used = parts[2].parse::<u64>().unwrap_or(0);
+                        println!("╠────────────────────────────────────────────────────────────────────────────╣");
+                        println!("║  GPU Memory:   Total: {:>6} MB | Used: {:>6} MB | Free: {:>6} MB       ║", total, used, free);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    println!("╠────────────────────────────────────────────────────────────────────────────╣");
+    println!("║  GPU Memory:   (Unable to query - nvidia-smi not available)               ║");
+}
+
+fn print_cuda_memory_info(device_index: i32) {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(output) = std::process::Command::new("nvidia-smi")
+            .args([
+                &format!("--id={}", device_index),
+                "--query-gpu=name,memory.total,memory.free,memory.used",
+                "--format=csv,noheader,nounits",
+            ])
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(s) = String::from_utf8(output.stdout) {
+                    let parts: Vec<&str> = s.trim().split(',').map(|s| s.trim()).collect();
+                    if parts.len() >= 4 {
+                        let name = parts[0];
+                        let total = parts[1].parse::<u64>().unwrap_or(0);
+                        let free = parts[2].parse::<u64>().unwrap_or(0);
+                        let used = parts[3].parse::<u64>().unwrap_or(0);
+                        println!("║  GPU Name:     {:<60} ║", name);
+                        println!("╠────────────────────────────────────────────────────────────────────────────╣");
+                        println!("║  VRAM Total:   {:>6} MB                                                  ║", total);
+                        println!("║  VRAM Used:    {:>6} MB                                                  ║", used);
+                        println!("║  VRAM Free:    {:>6} MB                                                  ║", free);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    println!("╠────────────────────────────────────────────────────────────────────────────╣");
+    println!("║  GPU Memory:   (Unable to query CUDA device memory)                       ║");
 }
 
 #[derive(Parser)]
@@ -244,6 +373,7 @@ fn main() {
                 run_from_config(&config_path);
             } else {
                 print_device_info(backend);
+                let device_location = backend_to_device_location(backend);
                 match backend {
                     BackendType::Ndarray => run_training::<NdArrayAutodiff>(
                         steps,
@@ -255,6 +385,7 @@ fn main() {
                         k_max,
                         context_length,
                         &data_dir,
+                        device_location,
                     ),
                     BackendType::Wgpu => run_training::<WgpuAutodiff>(
                         steps,
@@ -266,6 +397,7 @@ fn main() {
                         k_max,
                         context_length,
                         &data_dir,
+                        device_location,
                     ),
                     BackendType::Candle => run_training::<CandleAutodiff>(
                         steps,
@@ -277,6 +409,7 @@ fn main() {
                         k_max,
                         context_length,
                         &data_dir,
+                        device_location,
                     ),
                     BackendType::Cuda => run_training::<CudaAutodiff>(
                         steps,
@@ -288,6 +421,7 @@ fn main() {
                         k_max,
                         context_length,
                         &data_dir,
+                        device_location,
                     ),
                 }
             }
@@ -305,6 +439,7 @@ fn main() {
                 run_generate_from_config(&config_path, &prompt, checkpoint.as_deref());
             } else {
                 print_device_info(backend);
+                let device_location = backend_to_device_location(backend);
                 match backend {
                     BackendType::Ndarray => run_generation::<NdArrayAutodiff>(
                         &prompt,
@@ -312,6 +447,7 @@ fn main() {
                         temperature,
                         &data_dir,
                         checkpoint.as_deref(),
+                        device_location,
                     ),
                     BackendType::Wgpu => run_generation::<WgpuAutodiff>(
                         &prompt,
@@ -319,6 +455,7 @@ fn main() {
                         temperature,
                         &data_dir,
                         checkpoint.as_deref(),
+                        device_location,
                     ),
                     BackendType::Candle => run_generation::<CandleAutodiff>(
                         &prompt,
@@ -326,6 +463,7 @@ fn main() {
                         temperature,
                         &data_dir,
                         checkpoint.as_deref(),
+                        device_location,
                     ),
                     BackendType::Cuda => run_generation::<CudaAutodiff>(
                         &prompt,
@@ -333,17 +471,19 @@ fn main() {
                         temperature,
                         &data_dir,
                         checkpoint.as_deref(),
+                        device_location,
                     ),
                 }
             }
         }
         Some(Commands::Demo { backend }) => {
             println!("Using backend: {}\n", backend);
+            let device_location = backend_to_device_location(backend);
             match backend {
-                BackendType::Ndarray => run_demo::<NdArrayAutodiff>(),
-                BackendType::Wgpu => run_demo::<WgpuAutodiff>(),
-                BackendType::Candle => run_demo::<CandleAutodiff>(),
-                BackendType::Cuda => run_demo::<CudaAutodiff>(),
+                BackendType::Ndarray => run_demo::<NdArrayAutodiff>(device_location),
+                BackendType::Wgpu => run_demo::<WgpuAutodiff>(device_location),
+                BackendType::Candle => run_demo::<CandleAutodiff>(device_location),
+                BackendType::Cuda => run_demo::<CudaAutodiff>(device_location),
             }
         }
     }
@@ -382,11 +522,15 @@ fn run_from_config(config_path: &str) {
     let backend = parse_backend(&config.backend.backend_type);
     print_device_info(backend);
 
+    let device_location = backend_to_device_location(backend);
+
     match backend {
-        BackendType::Ndarray => run_training_from_config::<NdArrayAutodiff>(&config),
-        BackendType::Wgpu => run_training_from_config::<WgpuAutodiff>(&config),
-        BackendType::Candle => run_training_from_config::<CandleAutodiff>(&config),
-        BackendType::Cuda => run_training_from_config::<CudaAutodiff>(&config),
+        BackendType::Ndarray => {
+            run_training_from_config::<NdArrayAutodiff>(&config, device_location)
+        }
+        BackendType::Wgpu => run_training_from_config::<WgpuAutodiff>(&config, device_location),
+        BackendType::Candle => run_training_from_config::<CandleAutodiff>(&config, device_location),
+        BackendType::Cuda => run_training_from_config::<CudaAutodiff>(&config, device_location),
     }
 }
 
@@ -404,19 +548,31 @@ fn run_generate_from_config(config_path: &str, prompt: &str, checkpoint: Option<
     let backend = parse_backend(&config.backend.backend_type);
     print_device_info(backend);
 
+    let device_location = backend_to_device_location(backend);
+
     match backend {
-        BackendType::Ndarray => {
-            run_generate_with_config::<NdArrayAutodiff>(&config, prompt, checkpoint)
+        BackendType::Ndarray => run_generate_with_config::<NdArrayAutodiff>(
+            &config,
+            prompt,
+            checkpoint,
+            device_location,
+        ),
+        BackendType::Wgpu => {
+            run_generate_with_config::<WgpuAutodiff>(&config, prompt, checkpoint, device_location)
         }
-        BackendType::Wgpu => run_generate_with_config::<WgpuAutodiff>(&config, prompt, checkpoint),
         BackendType::Candle => {
-            run_generate_with_config::<CandleAutodiff>(&config, prompt, checkpoint)
+            run_generate_with_config::<CandleAutodiff>(&config, prompt, checkpoint, device_location)
         }
-        BackendType::Cuda => run_generate_with_config::<CudaAutodiff>(&config, prompt, checkpoint),
+        BackendType::Cuda => {
+            run_generate_with_config::<CudaAutodiff>(&config, prompt, checkpoint, device_location)
+        }
     }
 }
 
-fn run_training_from_config<B: burn::tensor::backend::AutodiffBackend>(config: &FullConfig) {
+fn run_training_from_config<B: burn::tensor::backend::AutodiffBackend>(
+    config: &FullConfig,
+    device_location: DeviceLocation,
+) {
     println!("=== DPSN Training (from config) ===\n");
 
     let text = match load_dataset_from_config(&config.dataset) {
@@ -478,6 +634,7 @@ fn run_training_from_config<B: burn::tensor::backend::AutodiffBackend>(config: &
             config.model.exploration_noise,
             &dataset,
             &device,
+            device_location,
         );
 
         println!("\n=== Generation Sample ===\n");
@@ -503,6 +660,7 @@ fn run_training_from_config<B: burn::tensor::backend::AutodiffBackend>(config: &
             config.model.exploration_noise,
             &dataset,
             &device,
+            device_location,
         );
 
         println!("\n=== Generation Sample ===\n");
@@ -520,6 +678,7 @@ fn run_generate_with_config<B: burn::tensor::backend::AutodiffBackend>(
     config: &FullConfig,
     prompt: &str,
     checkpoint: Option<&str>,
+    device_location: DeviceLocation,
 ) {
     println!("=== DPSN Text Generation (from config) ===\n");
 
@@ -559,12 +718,12 @@ fn run_generate_with_config<B: burn::tensor::backend::AutodiffBackend>(
             Ok(m) => m,
             Err(e) => {
                 eprintln!("Failed to load checkpoint: {}. Training new model...", e);
-                train_fresh_model::<B>(config, &dataset, &device)
+                train_fresh_model::<B>(config, &dataset, &device, device_location)
             }
         }
     } else {
         println!("No checkpoint found. Training new model...\n");
-        train_fresh_model::<B>(config, &dataset, &device)
+        train_fresh_model::<B>(config, &dataset, &device, device_location)
     };
 
     let generator = TextGenerator::new(&model, &dataset.tokenizer, device);
@@ -582,6 +741,7 @@ fn train_fresh_model<B: burn::tensor::backend::AutodiffBackend>(
     config: &FullConfig,
     dataset: &CharDataset,
     device: &<B::InnerBackend as burn::tensor::backend::Backend>::Device,
+    device_location: DeviceLocation,
 ) -> DPSN<B::InnerBackend> {
     let training_config = TrainingConfig::new()
         .with_num_steps(config.training.num_steps)
@@ -605,6 +765,7 @@ fn train_fresh_model<B: burn::tensor::backend::AutodiffBackend>(
         config.model.exploration_noise,
         dataset,
         device,
+        device_location,
     )
 }
 
@@ -618,6 +779,7 @@ fn run_training<B: burn::tensor::backend::AutodiffBackend>(
     k_max: usize,
     context_length: usize,
     data_dir: &str,
+    device_location: DeviceLocation,
 ) {
     println!("=== DPSN Training ===\n");
 
@@ -653,6 +815,7 @@ fn run_training<B: burn::tensor::backend::AutodiffBackend>(
         0.1,
         &dataset,
         &device,
+        device_location,
     );
 
     println!("\n=== Generation Sample ===\n");
@@ -668,6 +831,7 @@ fn run_generation<B: burn::tensor::backend::AutodiffBackend>(
     temperature: f64,
     data_dir: &str,
     checkpoint: Option<&str>,
+    device_location: DeviceLocation,
 ) {
     println!("=== DPSN Text Generation ===\n");
 
@@ -711,6 +875,7 @@ fn run_generation<B: burn::tensor::backend::AutodiffBackend>(
                     0.1,
                     &dataset,
                     &device,
+                    device_location,
                 )
             }
         }
@@ -735,6 +900,7 @@ fn run_generation<B: burn::tensor::backend::AutodiffBackend>(
             0.1,
             &dataset,
             &device,
+            device_location,
         )
     };
 
@@ -745,7 +911,7 @@ fn run_generation<B: burn::tensor::backend::AutodiffBackend>(
     println!("{}", generated);
 }
 
-fn run_demo<B: burn::tensor::backend::AutodiffBackend>() {
+fn run_demo<B: burn::tensor::backend::AutodiffBackend>(device_location: DeviceLocation) {
     println!("=== DPSN Demo Mode ===\n");
     println!("Running a quick demonstration with smaller parameters...\n");
 
@@ -788,6 +954,7 @@ fn run_demo<B: burn::tensor::backend::AutodiffBackend>() {
         0.1,
         &dataset,
         &device,
+        device_location,
     );
 
     println!("\n=== Quick Generation Test ===\n");

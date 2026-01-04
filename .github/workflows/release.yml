@@ -46,7 +46,7 @@ jobs:
         run: |
           mkdir -p staging
           cp target/release/dpsn staging/dpsn
-          if [ "${{ matrix.os }}" = "macos-15-large" ]; then
+          if [ "${{ matrix.os }}" = "macos-15-intel" ]; then
             cd staging && tar czvf ../dpsn-apple-darwin.tar.gz dpsn
           else
             cd staging && tar czvf ../dpsn-x86_64-unknown-linux-gnu.tar.gz dpsn

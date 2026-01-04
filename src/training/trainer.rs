@@ -12,7 +12,7 @@ use super::checkpoint::{save_checkpoint, save_hierarchical_checkpoint};
 use super::curriculum::{CurriculumConfig, TrainingPhase};
 use crate::data::batcher::DPSNBatcher;
 use crate::data::dataset::CharDataset;
-use crate::model::dpsn::{HierarchicalDPSN, DPSN};
+use crate::model::dpsn::{DeviceLocation, HierarchicalDPSN, Precision, DPSN};
 use crate::model::router::RoutingMode;
 
 #[derive(Config, Debug)]
@@ -80,6 +80,124 @@ fn get_routing_mode(schedule: &super::curriculum::CurriculumSchedule) -> Routing
     }
 }
 
+fn update_param_histogram<B: Backend>(histogram: &mut [u64], indices: &Tensor<B, 2, Int>) {
+    let indices_data: Vec<i32> = indices.clone().into_data().to_vec().unwrap();
+    for idx in indices_data {
+        if (idx as usize) < histogram.len() {
+            histogram[idx as usize] += 1;
+        }
+    }
+}
+
+fn print_routing_statistics(histogram: &[u64], pool_size: usize) {
+    let total_selections: u64 = histogram.iter().sum();
+    if total_selections == 0 {
+        println!("No routing data collected.");
+        return;
+    }
+
+    let used_params = histogram.iter().filter(|&&c| c > 0).count();
+    let avg_per_param = total_selections as f64 / pool_size as f64;
+
+    let mut indexed: Vec<(usize, u64)> = histogram.iter().cloned().enumerate().collect();
+    indexed.sort_by(|a, b| b.1.cmp(&a.1));
+
+    println!("\n╔══════════════════════════════════════════════════════════════════╗");
+    println!("║              PARAMETER SELECTION STATISTICS                      ║");
+    println!("╠══════════════════════════════════════════════════════════════════╣");
+    println!(
+        "║ Pool Size: {:>6} | Used: {:>6} ({:>5.1}%) | Total: {:>12}   ║",
+        pool_size,
+        used_params,
+        100.0 * used_params as f64 / pool_size as f64,
+        total_selections
+    );
+    println!(
+        "║ Avg selections per param: {:.1}                                    ║",
+        avg_per_param
+    );
+    println!("╠══════════════════════════════════════════════════════════════════╣");
+
+    println!("║ TOP 15 MOST SELECTED                                             ║");
+    println!("╠──────────────┬──────────────┬───────────────────────────────────╣");
+    println!("║ Param Index  │    Count     │  % of Total                       ║");
+    println!("╠──────────────┼──────────────┼───────────────────────────────────╣");
+    for (idx, count) in indexed.iter().take(15) {
+        let pct = 100.0 * *count as f64 / total_selections as f64;
+        let bar_len = (pct * 2.0).min(30.0) as usize;
+        let bar: String = "█".repeat(bar_len);
+        println!(
+            "║ {:>10}   │ {:>10}   │ {:>5.2}% {:<26} ║",
+            idx, count, pct, bar
+        );
+    }
+    println!("╠══════════════════════════════════════════════════════════════════╣");
+
+    println!("║ TOP 15 LEAST SELECTED (non-zero)                                 ║");
+    println!("╠──────────────┬──────────────┬───────────────────────────────────╣");
+    let non_zero: Vec<_> = indexed.iter().filter(|(_, c)| *c > 0).collect();
+    let least: Vec<_> = non_zero.iter().rev().take(15).collect();
+    for (idx, count) in least {
+        let pct = 100.0 * *count as f64 / total_selections as f64;
+        println!(
+            "║ {:>10}   │ {:>10}   │ {:>5.3}%                             ║",
+            idx, count, pct
+        );
+    }
+    println!("╠══════════════════════════════════════════════════════════════════╣");
+
+    let zero_count = histogram.iter().filter(|&&c| c == 0).count();
+    println!(
+        "║ NEVER SELECTED: {} params ({:.1}% of pool)                       ║",
+        zero_count,
+        100.0 * zero_count as f64 / pool_size as f64
+    );
+
+    let top_10_total: u64 = indexed.iter().take(10).map(|(_, c)| c).sum();
+    let top_10_pct = 100.0 * top_10_total as f64 / total_selections as f64;
+    println!(
+        "║ TOP 10 CONCENTRATION: {:.1}% of all selections                    ║",
+        top_10_pct
+    );
+
+    if top_10_pct > 50.0 {
+        println!("║ ⚠️  WARNING: Routing collapse detected! Top 10 params > 50%     ║");
+    } else if used_params < pool_size / 2 {
+        println!("║ ⚠️  WARNING: Low utilization! <50% of pool used                 ║");
+    } else {
+        println!("║ ✓  Routing appears healthy                                      ║");
+    }
+    println!("╚══════════════════════════════════════════════════════════════════╝\n");
+}
+
+fn print_curriculum_config(curriculum: &CurriculumConfig) {
+    println!("╔══════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                          CURRICULUM CONFIGURATION                            ║");
+    println!("╠══════════════════════════════════════════════════════════════════════════════╣");
+    println!(
+        "║  Phase 1 - Warm-up:        {:>6} steps  │  Random routing exploration      ║",
+        curriculum.warmup_steps
+    );
+    println!(
+        "║  Phase 2 - Specialization: {:>6} steps  │  ε-greedy with decay             ║",
+        curriculum.specialization_steps
+    );
+    println!(
+        "║  Phase 3 - Maturity:       {:>6} steps  │  Low ε fine-tuning               ║",
+        curriculum
+            .total_curriculum_steps()
+            .saturating_sub(curriculum.warmup_steps + curriculum.specialization_steps)
+            .max(0)
+    );
+    println!("╠────────────────────────────────────────────────────────────────────────────╣");
+    println!(
+        "║  Total Curriculum Steps:   {:>6}                                           ║",
+        curriculum.total_curriculum_steps()
+    );
+    println!("╚══════════════════════════════════════════════════════════════════════════════╝");
+    println!();
+}
+
 pub fn train<B: AutodiffBackend>(
     config: TrainingConfig,
     vocab_size: usize,
@@ -92,6 +210,7 @@ pub fn train<B: AutodiffBackend>(
     exploration_noise: f64,
     dataset: &CharDataset,
     device: &B::Device,
+    device_location: DeviceLocation,
 ) -> DPSN<B::InnerBackend> {
     let curriculum = CurriculumConfig::new();
     train_with_curriculum::<B>(
@@ -107,6 +226,7 @@ pub fn train<B: AutodiffBackend>(
         exploration_noise,
         dataset,
         device,
+        device_location,
     )
 }
 
@@ -123,6 +243,7 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
     exploration_noise: f64,
     dataset: &CharDataset,
     device: &B::Device,
+    device_location: DeviceLocation,
 ) -> DPSN<B::InnerBackend> {
     let mut model: DPSN<B> = DPSN::new(
         vocab_size,
@@ -139,23 +260,9 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
     let batcher = DPSNBatcher::new(context_length);
 
     let stats = model.param_stats();
-    println!("=== DPSN Model Statistics ===");
-    println!("Total parameters: {}", stats.total_params);
-    println!("Pool parameters: {}", stats.pool_params);
-    println!("Router parameters: {}", stats.router_params);
-    println!("Embedding parameters: {}", stats.embed_params);
-    println!("Output parameters: {}", stats.output_params);
-    println!("Active params per token: {}", stats.active_params_per_token);
-    println!("=============================\n");
+    stats.print_summary("DPSN", device_location, Precision::F32);
 
-    println!("=== Curriculum Configuration ===");
-    println!("Warm-up steps: {}", curriculum.warmup_steps);
-    println!("Specialization steps: {}", curriculum.specialization_steps);
-    println!(
-        "Total curriculum steps: {}",
-        curriculum.total_curriculum_steps()
-    );
-    println!("================================\n");
+    print_curriculum_config(&curriculum);
 
     println!("Starting training for {} steps...\n", config.num_steps);
 
@@ -165,6 +272,7 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
     let mut loss_count = 0;
     let mut last_phase = TrainingPhase::WarmUp;
     let mut nan_count = 0usize;
+    let mut param_histogram: Vec<u64> = vec![0; pool_size];
 
     for step in 0..config.num_steps {
         let schedule = curriculum.get_schedule(step);
@@ -184,6 +292,7 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
         let routing_mode = get_routing_mode(&schedule);
         let output = model.forward_with_mode(batch.inputs.clone(), routing_mode);
 
+        update_param_histogram(&mut param_histogram, &output.router_output.indices);
         let [batch_size, seq_len, vocab_size_out] = output.logits.dims();
         let logits_flat = output
             .logits
@@ -310,6 +419,7 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
     }
 
     println!("\nTraining completed!");
+    print_routing_statistics(&param_histogram, pool_size);
 
     let final_model = model.valid();
 
@@ -336,6 +446,7 @@ pub fn train_hierarchical<B: AutodiffBackend>(
     exploration_noise: f64,
     dataset: &CharDataset,
     device: &B::Device,
+    device_location: DeviceLocation,
 ) -> HierarchicalDPSN<B::InnerBackend> {
     let mut model: HierarchicalDPSN<B> = HierarchicalDPSN::new(
         vocab_size,
@@ -353,23 +464,9 @@ pub fn train_hierarchical<B: AutodiffBackend>(
     let batcher = DPSNBatcher::new(context_length);
 
     let stats = model.param_stats();
-    println!("=== HierarchicalDPSN Model Statistics ===");
-    println!("Total parameters: {}", stats.total_params);
-    println!("Pool parameters: {}", stats.pool_params);
-    println!("Router parameters: {} (HIERARCHICAL)", stats.router_params);
-    println!("Embedding parameters: {}", stats.embed_params);
-    println!("Output parameters: {}", stats.output_params);
-    println!("Active params per token: {}", stats.active_params_per_token);
-    println!("=========================================\n");
+    stats.print_summary("Hierarchical DPSN", device_location, Precision::F32);
 
-    println!("=== Curriculum Configuration ===");
-    println!("Warm-up steps: {}", curriculum.warmup_steps);
-    println!("Specialization steps: {}", curriculum.specialization_steps);
-    println!(
-        "Total curriculum steps: {}",
-        curriculum.total_curriculum_steps()
-    );
-    println!("================================\n");
+    print_curriculum_config(&curriculum);
 
     println!(
         "Starting hierarchical training for {} steps...\n",
@@ -382,6 +479,7 @@ pub fn train_hierarchical<B: AutodiffBackend>(
     let mut loss_count = 0;
     let mut last_phase = TrainingPhase::WarmUp;
     let mut nan_count = 0usize;
+    let mut param_histogram: Vec<u64> = vec![0; pool_size];
 
     for step in 0..config.num_steps {
         let schedule = curriculum.get_schedule(step);
@@ -401,6 +499,7 @@ pub fn train_hierarchical<B: AutodiffBackend>(
         let routing_mode = get_routing_mode(&schedule);
         let output = model.forward_with_mode(batch.inputs.clone(), routing_mode);
 
+        update_param_histogram(&mut param_histogram, &output.router_output.indices);
         let [batch_size, seq_len, vocab_size_out] = output.logits.dims();
         let logits_flat = output
             .logits
@@ -528,6 +627,7 @@ pub fn train_hierarchical<B: AutodiffBackend>(
     }
 
     println!("\nHierarchical training completed!");
+    print_routing_statistics(&param_histogram, pool_size);
 
     let final_model = model.valid();
 
