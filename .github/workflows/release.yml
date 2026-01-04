@@ -5,8 +5,11 @@ on:
 
 jobs:
   build:
-    name: Build and Release
-    runs-on: ubuntu-22.04
+    name: Build and Release (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: write
 
@@ -16,18 +19,14 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
 
-      - name: Cache target folder
-        uses: actions/cache@v4
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
         with:
-          path: target
-          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-target-
+          key: ${{ matrix.os }}-cargo-release
 
-      - name: Install dependencies
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
@@ -36,15 +35,22 @@ jobs:
         run: cargo build --release
 
       - name: Prepare binary
+        shell: bash
         run: |
           mkdir -p staging
           cp target/release/dpsn staging/dpsn
-          cd staging && tar czvf ../dpsn-x86_64-unknown-linux-gnu.tar.gz dpsn
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            cd staging && tar czvf ../dpsn-apple-darwin.tar.gz dpsn
+          else
+            cd staging && tar czvf ../dpsn-x86_64-unknown-linux-gnu.tar.gz dpsn
+          fi
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: DPSN
-          files: dpsn-x86_64-unknown-linux-gnu.tar.gz
+          files: |
+            dpsn-apple-darwin.tar.gz
+            dpsn-x86_64-unknown-linux-gnu.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
