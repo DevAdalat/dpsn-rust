@@ -36,3 +36,10 @@ curriculum:
   balance_weight: 0.1
   efficiency_weight: 0.05
   z_loss_weight: 0.001
+
+device_placement:
+  pool: "Gpu"       # Keep massive parameter pool in System RAM
+  router: "Gpu"     # Run routing logic on GPU
+  embedding: "Gpu"  # Compute embeddings on GPU
+  engine: "Gpu"     # Run attention/execution on GPU
+  head: "Gpu"       # Compute final output on GPU

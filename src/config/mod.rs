@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
+pub mod device;
+pub use device::*;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FullConfig {
     pub model: ModelConfig,
@@ -12,6 +15,8 @@ pub struct FullConfig {
     pub backend: BackendConfig,
     #[serde(default)]
     pub curriculum: CurriculumSettings,
+    #[serde(default)]
+    pub device_placement: Option<DevicePlacement>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -289,6 +294,7 @@ impl FullConfig {
                 backend_type: "ndarray".to_string(),
             },
             curriculum: CurriculumSettings::default(),
+            device_placement: None,
         }
     }
 
@@ -335,6 +341,7 @@ impl FullConfig {
                 specialization_steps: 60,
                 ..Default::default()
             },
+            device_placement: None,
         }
     }
 
@@ -387,6 +394,7 @@ impl FullConfig {
                 specialization_steps: 600,
                 ..Default::default()
             },
+            device_placement: Some(DevicePlacement::new_offloaded()),
         }
     }
 }

@@ -6,7 +6,7 @@ use burn::backend::Autodiff;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-use dpsn::config::FullConfig;
+use dpsn::config::{DevicePlacement, DeviceType, FullConfig};
 use dpsn::data::{download_tiny_shakespeare, load_dataset_from_config, CharDataset};
 use dpsn::inference::TextGenerator;
 use dpsn::model::{DeviceLocation, DPSN};
@@ -516,6 +516,28 @@ fn init_config(output: &str, template: &str) {
     }
 }
 
+fn resolve_device_location(config: &FullConfig, backend: BackendType) -> DeviceLocation {
+    if let Some(placement) = &config.device_placement {
+        if placement.is_offloaded() {
+            println!("Configuration: Using OFFLOADED architecture (Pool on CPU, Compute on GPU)");
+            return DeviceLocation::Offloaded;
+        } else if placement.is_all_cpu() {
+            println!("Configuration: Using ALL-CPU architecture");
+            return DeviceLocation::AllCpu;
+        } else if placement.is_all_gpu() {
+            println!("Configuration: Using ALL-GPU architecture");
+            return DeviceLocation::AllGpu;
+        } else {
+            println!("Configuration: Mixed placement detected. Defaulting to OFFLOADED for safety (Pool on CPU).");
+            if backend == BackendType::Ndarray {
+                return DeviceLocation::AllCpu;
+            }
+            return DeviceLocation::Offloaded;
+        }
+    }
+    backend_to_device_location(backend)
+}
+
 fn run_from_config(config_path: &str) {
     println!("Loading config from: {}\n", config_path);
 
@@ -530,7 +552,7 @@ fn run_from_config(config_path: &str) {
     let backend = parse_backend(&config.backend.backend_type);
     print_device_info(backend);
 
-    let device_location = backend_to_device_location(backend);
+    let device_location = resolve_device_location(&config, backend);
 
     match backend {
         BackendType::Ndarray => {
@@ -556,7 +578,7 @@ fn run_generate_from_config(config_path: &str, prompt: &str, checkpoint: Option<
     let backend = parse_backend(&config.backend.backend_type);
     print_device_info(backend);
 
-    let device_location = backend_to_device_location(backend);
+    let device_location = resolve_device_location(&config, backend);
 
     match backend {
         BackendType::Ndarray => run_generate_with_config::<NdArrayAutodiff>(
