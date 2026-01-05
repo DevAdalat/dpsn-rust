@@ -241,8 +241,11 @@ enum Commands {
         #[arg(long, short, default_value = "ndarray", value_enum)]
         backend: BackendType,
 
-        #[arg(long, default_value = "500")]
-        steps: usize,
+        #[arg(long)]
+        steps: Option<usize>,
+
+        #[arg(long)]
+        epochs: Option<usize>,
 
         #[arg(long, default_value = "32")]
         batch_size: usize,
@@ -360,6 +363,7 @@ fn main() {
             config,
             backend,
             steps,
+            epochs,
             batch_size,
             lr,
             pool_size,
@@ -377,6 +381,7 @@ fn main() {
                 match backend {
                     BackendType::Ndarray => run_training::<NdArrayAutodiff>(
                         steps,
+                        epochs,
                         batch_size,
                         lr,
                         pool_size,
@@ -389,6 +394,7 @@ fn main() {
                     ),
                     BackendType::Wgpu => run_training::<WgpuAutodiff>(
                         steps,
+                        epochs,
                         batch_size,
                         lr,
                         pool_size,
@@ -401,6 +407,7 @@ fn main() {
                     ),
                     BackendType::Candle => run_training::<CandleAutodiff>(
                         steps,
+                        epochs,
                         batch_size,
                         lr,
                         pool_size,
@@ -413,6 +420,7 @@ fn main() {
                     ),
                     BackendType::Cuda => run_training::<CudaAutodiff>(
                         steps,
+                        epochs,
                         batch_size,
                         lr,
                         pool_size,
@@ -598,6 +606,7 @@ fn run_training_from_config<B: burn::tensor::backend::AutodiffBackend>(
 
     let training_config = TrainingConfig::new()
         .with_num_steps(config.training.num_steps)
+        .with_num_epochs(config.training.num_epochs)
         .with_batch_size(config.training.batch_size)
         .with_learning_rate(config.training.learning_rate)
         .with_log_interval(config.training.log_interval)
@@ -770,7 +779,8 @@ fn train_fresh_model<B: burn::tensor::backend::AutodiffBackend>(
 }
 
 fn run_training<B: burn::tensor::backend::AutodiffBackend>(
-    steps: usize,
+    steps: Option<usize>,
+    epochs: Option<usize>,
     batch_size: usize,
     lr: f64,
     pool_size: usize,
@@ -793,12 +803,19 @@ fn run_training<B: burn::tensor::backend::AutodiffBackend>(
 
     let training_config = TrainingConfig::new()
         .with_num_steps(steps)
+        .with_num_epochs(epochs)
         .with_batch_size(batch_size)
         .with_learning_rate(lr);
 
+    let steps_estimate = if let Some(e) = epochs {
+        e * (dataset.len() / batch_size)
+    } else {
+        steps.unwrap_or(500)
+    };
+
     let curriculum_config = CurriculumConfig::new()
-        .with_warmup_steps(steps / 5)
-        .with_specialization_steps(steps * 2 / 5);
+        .with_warmup_steps(steps_estimate / 5)
+        .with_specialization_steps(steps_estimate * 2 / 5);
 
     let device = Default::default();
 
@@ -857,7 +874,7 @@ fn run_generation<B: burn::tensor::backend::AutodiffBackend>(
             Err(e) => {
                 eprintln!("Failed to load checkpoint: {}. Training new model...", e);
                 let training_config = TrainingConfig::new()
-                    .with_num_steps(100)
+                    .with_num_steps(Some(100))
                     .with_batch_size(16);
                 let curriculum_config = CurriculumConfig::new()
                     .with_warmup_steps(20)
@@ -882,7 +899,7 @@ fn run_generation<B: burn::tensor::backend::AutodiffBackend>(
     } else {
         println!("No checkpoint provided. Running quick training first...\n");
         let training_config = TrainingConfig::new()
-            .with_num_steps(100)
+            .with_num_steps(Some(100))
             .with_batch_size(16);
         let curriculum_config = CurriculumConfig::new()
             .with_warmup_steps(20)
@@ -931,7 +948,7 @@ fn run_demo<B: burn::tensor::backend::AutodiffBackend>(device_location: DeviceLo
     println!("  - Training samples: {}\n", dataset.len());
 
     let training_config = TrainingConfig::new()
-        .with_num_steps(100)
+        .with_num_steps(Some(100))
         .with_batch_size(16)
         .with_log_interval(20);
 

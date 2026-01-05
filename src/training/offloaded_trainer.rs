@@ -8,7 +8,7 @@ use super::checkpoint::save_offloaded_checkpoint;
 use super::curriculum::{CurriculumConfig, CurriculumSchedule, TrainingPhase};
 use super::trainer::TrainingConfig;
 use crate::data::batcher::DPSNBatcher;
-use crate::data::dataset::CharDataset;
+use crate::data::dataset::{CharDataset, DataLoader};
 use crate::model::offloaded_dpsn::{
     compute_w_active_gradients, OffloadedDPSN, OffloadedDPSNConfig, OffloadedDPSNGpuPart,
 };
@@ -127,6 +127,7 @@ where
     let mut model: OffloadedDPSN<B, CpuB> = model_config.init(gpu_device, cpu_device);
     let mut gpu_optimizer = AdamConfig::new().init();
     let batcher = DPSNBatcher::new(model_config.context_length);
+    let mut dataloader = DataLoader::new(dataset, config.batch_size, true);
 
     let stats = model.param_stats();
     stats.print_summary();
@@ -140,10 +141,76 @@ where
     );
     println!("================================\n");
 
-    println!(
-        "Starting OFFLOADED training for {} steps...\n",
-        config.num_steps
-    );
+    // --- Steps / Epochs Logic ---
+    let dataset_len = dataset.len();
+    let steps_per_epoch = dataset_len / config.batch_size;
+
+    let total_steps = if let Some(epochs) = config.num_epochs {
+        println!(
+            "Training for {} epochs ({} steps per epoch)",
+            epochs, steps_per_epoch
+        );
+        epochs * steps_per_epoch
+    } else if let Some(steps) = config.num_steps {
+        if steps > steps_per_epoch {
+            panic!(
+                "Error: Requested {} steps, but dataset only has enough data for {} steps (1 epoch).\n\
+                 To train for multiple passes over the data, please specify 'num_epochs' instead.",
+                steps, steps_per_epoch
+            );
+        }
+        steps
+    } else {
+        let default_steps = 500;
+        if default_steps > steps_per_epoch {
+            println!(
+                "Defaulting to 1 epoch ({} steps) as 500 steps would exceed data size.",
+                steps_per_epoch
+            );
+            steps_per_epoch
+        } else {
+            default_steps
+        }
+    };
+
+    println!("Starting OFFLOADED training for {} steps...\n", total_steps);
+
+    println!("================================\n");
+
+    // --- Steps / Epochs Logic ---
+    let dataset_len = dataset.len();
+    let steps_per_epoch = dataset_len / config.batch_size;
+
+    let total_steps = if let Some(epochs) = config.num_epochs {
+        println!(
+            "Training for {} epochs ({} steps per epoch)",
+            epochs, steps_per_epoch
+        );
+        epochs * steps_per_epoch
+    } else if let Some(steps) = config.num_steps {
+        if steps > steps_per_epoch {
+            panic!(
+                "Error: Requested {} steps, but dataset only has enough data for {} steps (1 epoch).\n\
+                 To train for multiple passes over the data, please specify 'num_epochs' instead.",
+                steps, steps_per_epoch
+            );
+        }
+        steps
+    } else {
+        // Default to 500 steps if nothing specified, but cap at 1 epoch
+        let default_steps = 500;
+        if default_steps > steps_per_epoch {
+            println!(
+                "Defaulting to 1 epoch ({} steps) as 500 steps would exceed data size.",
+                steps_per_epoch
+            );
+            steps_per_epoch
+        } else {
+            default_steps
+        }
+    };
+
+    println!("Starting OFFLOADED training for {} steps...\n", total_steps);
     println!("Pool on CPU: {} params", stats.cpu_params);
     println!("Model on GPU: {} params\n", stats.gpu_params);
 
@@ -156,7 +223,7 @@ where
     let mut param_histogram: Vec<u64> = vec![0; model_config.pool_size];
     let mut pool_data: Vec<f32>;
 
-    for step in 0..config.num_steps {
+    for step in 0..total_steps {
         let schedule = curriculum.get_schedule(step);
 
         if schedule.phase != last_phase {
@@ -169,7 +236,8 @@ where
             last_phase = schedule.phase;
         }
 
-        let batch = batcher.batch::<B>(dataset, config.batch_size, gpu_device);
+        let (inputs, targets) = dataloader.next_batch();
+        let batch = batcher.batch::<B>(inputs, targets, gpu_device);
         let routing_mode = get_routing_mode(&schedule);
 
         let output = model.forward_with_mode(batch.inputs.clone(), routing_mode);
@@ -301,7 +369,7 @@ where
             println!(
                 "Step {}/{} [{}] | Loss: {:.4} | Bal: {:.4} | Eff: {:.2} | k: {:.0} | ε: {:.3}",
                 step + 1,
-                config.num_steps,
+                total_steps,
                 schedule.phase,
                 avg_loss,
                 avg_balance,
@@ -347,7 +415,7 @@ where
             model_config.pool_size,
             model_config.embed_dim,
             checkpoint_dir,
-            config.num_steps,
+            total_steps,
         ) {
             eprintln!("Failed to save final checkpoint: {}", e);
         }

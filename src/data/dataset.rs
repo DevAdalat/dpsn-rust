@@ -219,3 +219,55 @@ impl CharDataset {
         (inputs, targets)
     }
 }
+
+pub struct DataLoader<'a> {
+    dataset: &'a CharDataset,
+    indices: Vec<usize>,
+    position: usize,
+    batch_size: usize,
+    shuffle: bool,
+}
+
+impl<'a> DataLoader<'a> {
+    pub fn new(dataset: &'a CharDataset, batch_size: usize, shuffle: bool) -> Self {
+        let mut indices: Vec<usize> = (0..dataset.len()).collect();
+        if shuffle {
+            use rand::seq::SliceRandom;
+            let mut rng = rand::thread_rng();
+            indices.shuffle(&mut rng);
+        }
+
+        DataLoader {
+            dataset,
+            indices,
+            position: 0,
+            batch_size,
+            shuffle,
+        }
+    }
+
+    pub fn next_batch(&mut self) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+        let mut inputs = Vec::with_capacity(self.batch_size);
+        let mut targets = Vec::with_capacity(self.batch_size);
+
+        for _ in 0..self.batch_size {
+            if self.position >= self.indices.len() {
+                self.position = 0;
+                if self.shuffle {
+                    use rand::seq::SliceRandom;
+                    let mut rng = rand::thread_rng();
+                    self.indices.shuffle(&mut rng);
+                }
+            }
+
+            let idx = self.indices[self.position];
+            if let Some((input, target)) = self.dataset.get_sample(idx) {
+                inputs.push(input);
+                targets.push(target);
+            }
+            self.position += 1;
+        }
+
+        (inputs, targets)
+    }
+}

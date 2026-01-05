@@ -47,16 +47,12 @@ fn make_contiguous_int<B: Backend, const D: usize>(tensor: Tensor<B, D, Int>) ->
 
 impl<B: Backend> ParameterPool<B> {
     pub fn retrieve(&self, indices: Tensor<B, 2, Int>) -> Tensor<B, 3> {
-        let [batch_size, _k] = indices.dims();
+        let [batch_size, k] = indices.dims();
         let pool = self.pool.val();
-        let d = self.dim;
 
-        let indices_expanded = indices.clone().unsqueeze_dim::<3>(2).repeat_dim(2, d);
-        let indices_expanded = make_contiguous_int(indices_expanded);
+        let indices_flat = indices.reshape([batch_size * k]);
+        let selected = pool.select(0, indices_flat);
 
-        let pool_expanded = pool.clone().unsqueeze_dim::<3>(0).repeat_dim(0, batch_size);
-        let pool_expanded = make_contiguous(pool_expanded);
-
-        pool_expanded.gather(1, indices_expanded)
+        selected.reshape([batch_size, k, self.dim])
     }
 }

@@ -11,14 +11,15 @@ const NAN_PATIENCE: usize = 3;
 use super::checkpoint::{save_checkpoint, save_hierarchical_checkpoint};
 use super::curriculum::{CurriculumConfig, TrainingPhase};
 use crate::data::batcher::DPSNBatcher;
-use crate::data::dataset::CharDataset;
+use crate::data::dataset::{CharDataset, DataLoader};
 use crate::model::dpsn::{DeviceLocation, HierarchicalDPSN, Precision, DPSN};
 use crate::model::router::RoutingMode;
 
 #[derive(Config, Debug)]
 pub struct TrainingConfig {
-    #[config(default = 500)]
-    pub num_steps: usize,
+    pub num_steps: Option<usize>,
+
+    pub num_epochs: Option<usize>,
 
     #[config(default = 32)]
     pub batch_size: usize,
@@ -258,23 +259,55 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
     );
     let mut optimizer = AdamConfig::new().init();
     let batcher = DPSNBatcher::new(context_length);
+    let mut dataloader = DataLoader::new(dataset, config.batch_size, true);
 
     let stats = model.param_stats();
     stats.print_summary("DPSN", device_location, Precision::F32);
 
     print_curriculum_config(&curriculum);
 
-    println!("Starting training for {} steps...\n", config.num_steps);
+    let dataset_len = dataset.len();
+    let steps_per_epoch = dataset_len / config.batch_size;
 
-    let mut running_loss = 0.0f32;
-    let mut running_balance = 0.0f32;
-    let mut running_efficiency = 0.0f32;
+    let total_steps = if let Some(epochs) = config.num_epochs {
+        println!(
+            "Training for {} epochs ({} steps per epoch)",
+            epochs, steps_per_epoch
+        );
+        epochs * steps_per_epoch
+    } else if let Some(steps) = config.num_steps {
+        if steps > steps_per_epoch {
+            panic!(
+                "Error: Requested {} steps, but dataset only has enough data for {} steps (1 epoch).\n\
+                 To train for multiple passes over the data, please specify 'num_epochs' instead.",
+                steps, steps_per_epoch
+            );
+        }
+        steps
+    } else {
+        let default_steps = 500;
+        if default_steps > steps_per_epoch {
+            println!(
+                "Defaulting to 1 epoch ({} steps) as 500 steps would exceed data size.",
+                steps_per_epoch
+            );
+            steps_per_epoch
+        } else {
+            default_steps
+        }
+    };
+
+    println!("Starting training for {} steps...\n", total_steps);
+
+    let mut running_loss = Tensor::<B, 1>::zeros([1], device);
+    let mut running_balance = Tensor::<B, 1>::zeros([1], device);
+    let mut running_efficiency = Tensor::<B, 1>::zeros([1], device);
     let mut loss_count = 0;
     let mut last_phase = TrainingPhase::WarmUp;
     let mut nan_count = 0usize;
     let mut param_histogram: Vec<u64> = vec![0; pool_size];
 
-    for step in 0..config.num_steps {
+    for step in 0..total_steps {
         let schedule = curriculum.get_schedule(step);
 
         if schedule.phase != last_phase {
@@ -287,12 +320,12 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
             last_phase = schedule.phase;
         }
 
-        let batch = batcher.batch::<B>(dataset, config.batch_size, device);
+        let (inputs, targets) = dataloader.next_batch();
+        let batch = batcher.batch::<B>(inputs, targets, device);
 
         let routing_mode = get_routing_mode(&schedule);
         let output = model.forward_with_mode(batch.inputs.clone(), routing_mode);
 
-        update_param_histogram(&mut param_histogram, &output.router_output.indices);
         let [batch_size, seq_len, vocab_size_out] = output.logits.dims();
         let logits_flat = output
             .logits
@@ -320,67 +353,70 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
             + aux_losses.efficiency_loss.clone() * efficiency_weight
             + aux_losses.z_loss.clone() * z_loss_weight;
 
-        let loss_scalar: f32 = main_loss
-            .clone()
-            .into_data()
-            .to_vec::<f32>()
-            .unwrap()
-            .first()
-            .copied()
-            .unwrap_or(0.0);
-
-        let balance_scalar: f32 = aux_losses
-            .balance_loss
-            .clone()
-            .into_data()
-            .to_vec::<f32>()
-            .unwrap()
-            .first()
-            .copied()
-            .unwrap_or(0.0);
-
-        let efficiency_scalar: f32 = aux_losses
-            .efficiency_loss
-            .clone()
-            .into_data()
-            .to_vec::<f32>()
-            .unwrap()
-            .first()
-            .copied()
-            .unwrap_or(0.0);
-
-        running_loss += loss_scalar;
-        running_balance += balance_scalar;
-        running_efficiency += efficiency_scalar;
+        // --- OPTIMIZATION: Accumulate on GPU, sync only at log interval ---
+        running_loss = running_loss + main_loss.clone().detach();
+        running_balance = running_balance + aux_losses.balance_loss.clone().detach();
+        running_efficiency = running_efficiency + aux_losses.efficiency_loss.clone().detach();
         loss_count += 1;
-
-        if loss_scalar.is_nan() || loss_scalar.is_infinite() {
-            nan_count += 1;
-            eprintln!(
-                "WARNING: NaN/Inf loss at step {} ({}/{}). Skipping.",
-                step + 1,
-                nan_count,
-                NAN_PATIENCE
-            );
-            if nan_count >= NAN_PATIENCE {
-                eprintln!(
-                    "FATAL: {} consecutive NaN losses. Stopping training.",
-                    NAN_PATIENCE
-                );
-                break;
-            }
-            continue;
-        }
-        nan_count = 0;
 
         let grads = total_loss.backward();
         let grads = GradientsParams::from_grads(grads, &model);
         model = optimizer.step(config.learning_rate, model, grads);
 
         if (step + 1) % config.log_interval == 0 {
-            let avg_loss = running_loss / loss_count as f32;
-            let avg_balance = running_balance / loss_count as f32;
-            let avg_efficiency = running_efficiency / loss_count as f32;
+            // Move histogram update here to avoid per-step sync
+            update_param_histogram(&mut param_histogram, &output.router_output.indices);
+
+            // Sync scalars now
+            let loss_scalar: f32 = running_loss
+                .clone()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap()
+                .first()
+                .copied()
+                .unwrap_or(0.0)
+                / loss_count as f32;
+
+            let balance_scalar: f32 = running_balance
+                .clone()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap()
+                .first()
+                .copied()
+                .unwrap_or(0.0)
+                / loss_count as f32;
+
+            let efficiency_scalar: f32 = running_efficiency
+                .clone()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap()
+                .first()
+                .copied()
+                .unwrap_or(0.0)
+                / loss_count as f32;
+
+            // Check for NaN on the averaged loss
+            if loss_scalar.is_nan() || loss_scalar.is_infinite() {
+                nan_count += 1;
+                eprintln!(
+                    "WARNING: NaN/Inf average loss at step {} ({}/{}).",
+                    step + 1,
+                    nan_count,
+                    NAN_PATIENCE
+                );
+                if nan_count >= NAN_PATIENCE {
+                    panic!(
+                        "FATAL: {} consecutive NaN log intervals. Stopping.",
+                        NAN_PATIENCE
+                    );
+                }
+                // We can't easily skip retrospectively, but we reset.
+            } else {
+                nan_count = 0;
+            }
 
             let avg_budget: f32 = output
                 .router_output
@@ -393,18 +429,18 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
             println!(
                 "Step {}/{} [{}] | Loss: {:.4} | Balance: {:.4} | Eff: {:.2} | Budget: {:.0} | ε: {:.3}",
                 step + 1,
-                config.num_steps,
+                total_steps,
                 schedule.phase,
-                avg_loss,
-                avg_balance,
-                avg_efficiency,
+                loss_scalar,
+                balance_scalar,
+                efficiency_scalar,
                 avg_budget,
                 schedule.epsilon
             );
 
-            running_loss = 0.0;
-            running_balance = 0.0;
-            running_efficiency = 0.0;
+            running_loss = Tensor::zeros([1], device);
+            running_balance = Tensor::zeros([1], device);
+            running_efficiency = Tensor::zeros([1], device);
             loss_count = 0;
         }
 
@@ -424,7 +460,7 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
     let final_model = model.valid();
 
     if let Some(ref checkpoint_dir) = config.checkpoint_dir {
-        if let Err(e) = save_checkpoint(&final_model, checkpoint_dir, config.num_steps) {
+        if let Err(e) = save_checkpoint(&final_model, checkpoint_dir, total_steps) {
             eprintln!("Failed to save final checkpoint: {}", e);
         }
     }
@@ -462,26 +498,58 @@ pub fn train_hierarchical<B: AutodiffBackend>(
     );
     let mut optimizer = AdamConfig::new().init();
     let batcher = DPSNBatcher::new(context_length);
+    let mut dataloader = DataLoader::new(dataset, config.batch_size, true);
 
     let stats = model.param_stats();
     stats.print_summary("Hierarchical DPSN", device_location, Precision::F32);
 
     print_curriculum_config(&curriculum);
 
+    let dataset_len = dataset.len();
+    let steps_per_epoch = dataset_len / config.batch_size;
+
+    let total_steps = if let Some(epochs) = config.num_epochs {
+        println!(
+            "Training for {} epochs ({} steps per epoch)",
+            epochs, steps_per_epoch
+        );
+        epochs * steps_per_epoch
+    } else if let Some(steps) = config.num_steps {
+        if steps > steps_per_epoch {
+            panic!(
+                "Error: Requested {} steps, but dataset only has enough data for {} steps (1 epoch).\n\
+                 To train for multiple passes over the data, please specify 'num_epochs' instead.",
+                steps, steps_per_epoch
+            );
+        }
+        steps
+    } else {
+        let default_steps = 500;
+        if default_steps > steps_per_epoch {
+            println!(
+                "Defaulting to 1 epoch ({} steps) as 500 steps would exceed data size.",
+                steps_per_epoch
+            );
+            steps_per_epoch
+        } else {
+            default_steps
+        }
+    };
+
     println!(
         "Starting hierarchical training for {} steps...\n",
-        config.num_steps
+        total_steps
     );
 
-    let mut running_loss = 0.0f32;
-    let mut running_balance = 0.0f32;
-    let mut running_efficiency = 0.0f32;
+    let mut running_loss = Tensor::<B, 1>::zeros([1], device);
+    let mut running_balance = Tensor::<B, 1>::zeros([1], device);
+    let mut running_efficiency = Tensor::<B, 1>::zeros([1], device);
     let mut loss_count = 0;
     let mut last_phase = TrainingPhase::WarmUp;
     let mut nan_count = 0usize;
     let mut param_histogram: Vec<u64> = vec![0; pool_size];
 
-    for step in 0..config.num_steps {
+    for step in 0..total_steps {
         let schedule = curriculum.get_schedule(step);
 
         if schedule.phase != last_phase {
@@ -494,12 +562,12 @@ pub fn train_hierarchical<B: AutodiffBackend>(
             last_phase = schedule.phase;
         }
 
-        let batch = batcher.batch::<B>(dataset, config.batch_size, device);
+        let (inputs, targets) = dataloader.next_batch();
+        let batch = batcher.batch::<B>(inputs, targets, device);
 
         let routing_mode = get_routing_mode(&schedule);
         let output = model.forward_with_mode(batch.inputs.clone(), routing_mode);
 
-        update_param_histogram(&mut param_histogram, &output.router_output.indices);
         let [batch_size, seq_len, vocab_size_out] = output.logits.dims();
         let logits_flat = output
             .logits
@@ -527,67 +595,69 @@ pub fn train_hierarchical<B: AutodiffBackend>(
             + aux_losses.efficiency_loss.clone() * efficiency_weight
             + aux_losses.z_loss.clone() * z_loss_weight;
 
-        let loss_scalar: f32 = main_loss
-            .clone()
-            .into_data()
-            .to_vec::<f32>()
-            .unwrap()
-            .first()
-            .copied()
-            .unwrap_or(0.0);
-
-        let balance_scalar: f32 = aux_losses
-            .balance_loss
-            .clone()
-            .into_data()
-            .to_vec::<f32>()
-            .unwrap()
-            .first()
-            .copied()
-            .unwrap_or(0.0);
-
-        let efficiency_scalar: f32 = aux_losses
-            .efficiency_loss
-            .clone()
-            .into_data()
-            .to_vec::<f32>()
-            .unwrap()
-            .first()
-            .copied()
-            .unwrap_or(0.0);
-
-        running_loss += loss_scalar;
-        running_balance += balance_scalar;
-        running_efficiency += efficiency_scalar;
+        // --- OPTIMIZATION: Accumulate on GPU, sync only at log interval ---
+        running_loss = running_loss + main_loss.clone().detach();
+        running_balance = running_balance + aux_losses.balance_loss.clone().detach();
+        running_efficiency = running_efficiency + aux_losses.efficiency_loss.clone().detach();
         loss_count += 1;
-
-        if loss_scalar.is_nan() || loss_scalar.is_infinite() {
-            nan_count += 1;
-            eprintln!(
-                "WARNING: NaN/Inf loss at step {} ({}/{}). Skipping.",
-                step + 1,
-                nan_count,
-                NAN_PATIENCE
-            );
-            if nan_count >= NAN_PATIENCE {
-                eprintln!(
-                    "FATAL: {} consecutive NaN losses. Stopping training.",
-                    NAN_PATIENCE
-                );
-                break;
-            }
-            continue;
-        }
-        nan_count = 0;
 
         let grads = total_loss.backward();
         let grads = GradientsParams::from_grads(grads, &model);
         model = optimizer.step(config.learning_rate, model, grads);
 
         if (step + 1) % config.log_interval == 0 {
-            let avg_loss = running_loss / loss_count as f32;
-            let avg_balance = running_balance / loss_count as f32;
-            let avg_efficiency = running_efficiency / loss_count as f32;
+            // Move histogram update here to avoid per-step sync
+            update_param_histogram(&mut param_histogram, &output.router_output.indices);
+
+            // Sync scalars now
+            let loss_scalar: f32 = running_loss
+                .clone()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap()
+                .first()
+                .copied()
+                .unwrap_or(0.0)
+                / loss_count as f32;
+
+            let balance_scalar: f32 = running_balance
+                .clone()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap()
+                .first()
+                .copied()
+                .unwrap_or(0.0)
+                / loss_count as f32;
+
+            let efficiency_scalar: f32 = running_efficiency
+                .clone()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap()
+                .first()
+                .copied()
+                .unwrap_or(0.0)
+                / loss_count as f32;
+
+            // Check for NaN on the averaged loss
+            if loss_scalar.is_nan() || loss_scalar.is_infinite() {
+                nan_count += 1;
+                eprintln!(
+                    "WARNING: NaN/Inf average loss at step {} ({}/{}).",
+                    step + 1,
+                    nan_count,
+                    NAN_PATIENCE
+                );
+                if nan_count >= NAN_PATIENCE {
+                    panic!(
+                        "FATAL: {} consecutive NaN log intervals. Stopping.",
+                        NAN_PATIENCE
+                    );
+                }
+            } else {
+                nan_count = 0;
+            }
 
             let avg_budget: f32 = output
                 .router_output
@@ -600,18 +670,18 @@ pub fn train_hierarchical<B: AutodiffBackend>(
             println!(
                 "Step {}/{} [{}] | Loss: {:.4} | Balance: {:.4} | Eff: {:.2} | Budget: {:.0} | ε: {:.3}",
                 step + 1,
-                config.num_steps,
+                total_steps,
                 schedule.phase,
-                avg_loss,
-                avg_balance,
-                avg_efficiency,
+                loss_scalar,
+                balance_scalar,
+                efficiency_scalar,
                 avg_budget,
                 schedule.epsilon
             );
 
-            running_loss = 0.0;
-            running_balance = 0.0;
-            running_efficiency = 0.0;
+            running_loss = Tensor::zeros([1], device);
+            running_balance = Tensor::zeros([1], device);
+            running_efficiency = Tensor::zeros([1], device);
             loss_count = 0;
         }
 
@@ -632,8 +702,7 @@ pub fn train_hierarchical<B: AutodiffBackend>(
     let final_model = model.valid();
 
     if let Some(ref checkpoint_dir) = config.checkpoint_dir {
-        if let Err(e) = save_hierarchical_checkpoint(&final_model, checkpoint_dir, config.num_steps)
-        {
+        if let Err(e) = save_hierarchical_checkpoint(&final_model, checkpoint_dir, total_steps) {
             eprintln!("Failed to save final checkpoint: {}", e);
         }
     }

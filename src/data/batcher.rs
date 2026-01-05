@@ -1,8 +1,6 @@
 use burn::prelude::*;
 use burn::tensor::backend::Backend;
 
-use super::dataset::CharDataset;
-
 pub struct TrainingBatch<B: Backend> {
     pub inputs: Tensor<B, 2, Int>,
     pub targets: Tensor<B, 2, Int>,
@@ -20,11 +18,11 @@ impl DPSNBatcher {
 
     pub fn batch<B: Backend>(
         &self,
-        dataset: &CharDataset,
-        batch_size: usize,
+        inputs_vec: Vec<Vec<usize>>,
+        targets_vec: Vec<Vec<usize>>,
         device: &B::Device,
     ) -> TrainingBatch<B> {
-        let (inputs_vec, targets_vec) = dataset.get_random_batch(batch_size);
+        let batch_size = inputs_vec.len();
 
         let inputs_flat: Vec<i64> = inputs_vec.iter().flatten().map(|&x| x as i64).collect();
 

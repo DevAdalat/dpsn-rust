@@ -42,8 +42,10 @@ pub struct ModelConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingSettings {
-    #[serde(default = "default_num_steps")]
-    pub num_steps: usize,
+    #[serde(default)]
+    pub num_steps: Option<usize>,
+    #[serde(default)]
+    pub num_epochs: Option<usize>,
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
     #[serde(default = "default_learning_rate")]
@@ -264,7 +266,8 @@ impl FullConfig {
                 top_clusters: 4,
             },
             training: TrainingSettings {
-                num_steps: 500,
+                num_steps: Some(500),
+                num_epochs: None,
                 batch_size: 32,
                 learning_rate: 0.001,
                 log_interval: 50,
@@ -305,7 +308,8 @@ impl FullConfig {
                 top_clusters: 4,
             },
             training: TrainingSettings {
-                num_steps: 100,
+                num_steps: Some(100),
+                num_epochs: None,
                 batch_size: 16,
                 learning_rate: 0.001,
                 log_interval: 20,
@@ -350,7 +354,8 @@ impl FullConfig {
                 top_clusters: 8,
             },
             training: TrainingSettings {
-                num_steps: 1000,
+                num_steps: Some(1000),
+                num_epochs: None,
                 batch_size: 32,
                 learning_rate: 0.001,
                 log_interval: 50,

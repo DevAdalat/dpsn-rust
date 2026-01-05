@@ -190,6 +190,7 @@ impl<B: Backend> HierarchicalRouter<B> {
             .clone()
             .reshape([batch_size * self.top_clusters])
             .into_data()
+            .convert::<i64>()
             .to_vec()
             .unwrap();
 
@@ -217,6 +218,7 @@ impl<B: Backend> HierarchicalRouter<B> {
             .clone()
             .reshape([batch_size * self.cluster_size])
             .into_data()
+            .convert::<i64>()
             .to_vec()
             .unwrap();
 
