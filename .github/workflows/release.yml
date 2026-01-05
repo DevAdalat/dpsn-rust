@@ -39,7 +39,7 @@ jobs:
             JOBS=$(sysctl -n hw.ncpu)
           fi
           echo "Building with $JOBS jobs"
-          cargo build --release -j $JOBS
+          CUDARC_CUDA_VERSION="12060" cargo build --release -j $JOBS
 
       - name: Prepare binary
         shell: bash
