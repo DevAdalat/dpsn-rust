@@ -207,6 +207,7 @@ pub fn train<B: AutodiffBackend>(
     k_min: usize,
     k_max: usize,
     router_hidden_dim: usize,
+    num_heads: usize,
     context_length: usize,
     exploration_noise: f64,
     dataset: &CharDataset,
@@ -223,6 +224,7 @@ pub fn train<B: AutodiffBackend>(
         k_min,
         k_max,
         router_hidden_dim,
+        num_heads,
         context_length,
         exploration_noise,
         dataset,
@@ -240,8 +242,10 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
     k_min: usize,
     k_max: usize,
     router_hidden_dim: usize,
+    num_heads: usize,
     context_length: usize,
     exploration_noise: f64,
+
     dataset: &CharDataset,
     device: &B::Device,
     device_location: DeviceLocation,
@@ -253,10 +257,12 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
         k_min,
         k_max,
         router_hidden_dim,
+        num_heads,
         context_length,
         exploration_noise,
         device,
     );
+
     let mut optimizer = AdamConfig::new().init();
     let batcher = DPSNBatcher::new(context_length);
     let mut dataloader = DataLoader::new(dataset, config.batch_size, true);
@@ -478,6 +484,7 @@ pub fn train_hierarchical<B: AutodiffBackend>(
     k_max: usize,
     num_clusters: usize,
     top_clusters: usize,
+    num_heads: usize,
     context_length: usize,
     exploration_noise: f64,
     dataset: &CharDataset,
@@ -492,6 +499,7 @@ pub fn train_hierarchical<B: AutodiffBackend>(
         k_max,
         num_clusters,
         top_clusters,
+        num_heads,
         context_length,
         exploration_noise,
         device,

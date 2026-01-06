@@ -43,6 +43,8 @@ pub struct ModelConfig {
     pub num_clusters: usize,
     #[serde(default = "default_top_clusters")]
     pub top_clusters: usize,
+    #[serde(default = "default_num_heads")]
+    pub num_heads: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +183,9 @@ fn default_num_clusters() -> usize {
 fn default_top_clusters() -> usize {
     4
 }
+fn default_num_heads() -> usize {
+    4
+}
 fn default_num_steps() -> usize {
     500
 }
@@ -269,6 +274,7 @@ impl FullConfig {
                 use_hierarchical_router: false,
                 num_clusters: 32,
                 top_clusters: 4,
+                num_heads: 4,
             },
             training: TrainingSettings {
                 num_steps: Some(500),
@@ -312,6 +318,7 @@ impl FullConfig {
                 use_hierarchical_router: false,
                 num_clusters: 32,
                 top_clusters: 4,
+                num_heads: 4,
             },
             training: TrainingSettings {
                 num_steps: Some(100),
@@ -359,6 +366,7 @@ impl FullConfig {
                 use_hierarchical_router: true,
                 num_clusters: 64,
                 top_clusters: 8,
+                num_heads: 8,
             },
             training: TrainingSettings {
                 num_steps: Some(1000),

@@ -265,6 +265,9 @@ enum Commands {
         #[arg(long, default_value = "5000")]
         k_max: usize,
 
+        #[arg(long, default_value = "4")]
+        num_heads: usize,
+
         #[arg(long, default_value = "64")]
         context_length: usize,
 
@@ -370,6 +373,7 @@ fn main() {
             embed_dim,
             k_min,
             k_max,
+            num_heads,
             context_length,
             data_dir,
         }) => {
@@ -388,6 +392,7 @@ fn main() {
                         embed_dim,
                         k_min,
                         k_max,
+                        num_heads,
                         context_length,
                         &data_dir,
                         device_location,
@@ -401,6 +406,7 @@ fn main() {
                         embed_dim,
                         k_min,
                         k_max,
+                        num_heads,
                         context_length,
                         &data_dir,
                         device_location,
@@ -414,6 +420,7 @@ fn main() {
                         embed_dim,
                         k_min,
                         k_max,
+                        num_heads,
                         context_length,
                         &data_dir,
                         device_location,
@@ -427,6 +434,7 @@ fn main() {
                         embed_dim,
                         k_min,
                         k_max,
+                        num_heads,
                         context_length,
                         &data_dir,
                         device_location,
@@ -599,6 +607,100 @@ fn run_generate_from_config(config_path: &str, prompt: &str, checkpoint: Option<
     }
 }
 
+fn run_generate_with_config<B: burn::tensor::backend::AutodiffBackend>(
+    config: &FullConfig,
+    prompt: &str,
+    checkpoint: Option<&str>,
+    device_location: DeviceLocation,
+) {
+    println!("=== DPSN Text Generation (from config) ===\n");
+
+    let text = match load_dataset_from_config(&config.dataset) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Failed to load dataset: {}", e);
+            return;
+        }
+    };
+
+    let dataset = CharDataset::new(&text, config.model.context_length);
+    let device: <B::InnerBackend as burn::tensor::backend::Backend>::Device = Default::default();
+
+    let model: DPSN<B::InnerBackend> = if let Some(ckpt_path) = checkpoint {
+        println!("Loading model from checkpoint: {}\n", ckpt_path);
+        let fresh_model: DPSN<B::InnerBackend> = DPSN::new(
+            dataset.vocab_size(),
+            config.model.embed_dim,
+            config.model.pool_size,
+            config.model.k_min,
+            config.model.k_max,
+            config.model.router_hidden_dim,
+            config.model.num_heads,
+            config.model.context_length,
+            config.model.exploration_noise,
+            &device,
+        );
+        match load_checkpoint(fresh_model, &PathBuf::from(ckpt_path), &device) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("Failed to load checkpoint: {}. Training new model...", e);
+                train_with_curriculum::<B>(
+                    TrainingConfig::new()
+                        .with_num_steps(config.training.num_steps)
+                        .with_batch_size(config.training.batch_size),
+                    CurriculumConfig::new()
+                        .with_warmup_steps(config.curriculum.warmup_steps)
+                        .with_specialization_steps(config.curriculum.specialization_steps),
+                    dataset.vocab_size(),
+                    config.model.embed_dim,
+                    config.model.pool_size,
+                    config.model.k_min,
+                    config.model.k_max,
+                    config.model.router_hidden_dim,
+                    config.model.num_heads,
+                    config.model.context_length,
+                    config.model.exploration_noise,
+                    &dataset,
+                    &device,
+                    device_location,
+                )
+            }
+        }
+    } else {
+        println!("No checkpoint provided. Running training as per config...\n");
+        train_with_curriculum::<B>(
+            TrainingConfig::new()
+                .with_num_steps(config.training.num_steps)
+                .with_batch_size(config.training.batch_size),
+            CurriculumConfig::new()
+                .with_warmup_steps(config.curriculum.warmup_steps)
+                .with_specialization_steps(config.curriculum.specialization_steps),
+            dataset.vocab_size(),
+            config.model.embed_dim,
+            config.model.pool_size,
+            config.model.k_min,
+            config.model.k_max,
+            config.model.router_hidden_dim,
+            config.model.num_heads,
+            config.model.context_length,
+            config.model.exploration_noise,
+            &dataset,
+            &device,
+            device_location,
+        )
+    };
+
+    let generator = TextGenerator::new(&model, &dataset.tokenizer, device);
+    let generated = generator.generate(
+        prompt,
+        config.inference.max_tokens,
+        config.inference.temperature,
+    );
+
+    println!("\n=== Generated Text ===\n");
+    println!("{}", generated);
+}
+
 fn run_training_from_config<B: burn::tensor::backend::AutodiffBackend>(
     config: &FullConfig,
     device_location: DeviceLocation,
@@ -661,6 +763,7 @@ fn run_training_from_config<B: burn::tensor::backend::AutodiffBackend>(
             config.model.k_max,
             config.model.num_clusters,
             config.model.top_clusters,
+            config.model.num_heads,
             config.model.context_length,
             config.model.exploration_noise,
             &dataset,
@@ -687,117 +790,14 @@ fn run_training_from_config<B: burn::tensor::backend::AutodiffBackend>(
             config.model.k_min,
             config.model.k_max,
             config.model.router_hidden_dim,
+            config.model.num_heads,
             config.model.context_length,
             config.model.exploration_noise,
             &dataset,
             &device,
             device_location,
         );
-
-        println!("\n=== Generation Sample ===\n");
-        let generator = TextGenerator::new(&model, &dataset.tokenizer, device);
-        let generated = generator.generate(
-            &config.inference.default_prompt,
-            config.inference.max_tokens,
-            config.inference.temperature,
-        );
-        println!("{}", generated);
     }
-}
-
-fn run_generate_with_config<B: burn::tensor::backend::AutodiffBackend>(
-    config: &FullConfig,
-    prompt: &str,
-    checkpoint: Option<&str>,
-    device_location: DeviceLocation,
-) {
-    println!("=== DPSN Text Generation (from config) ===\n");
-
-    let text = match load_dataset_from_config(&config.dataset) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("Failed to load dataset: {}", e);
-            return;
-        }
-    };
-
-    let dataset = CharDataset::new(&text, config.model.context_length);
-    let device: <B::InnerBackend as burn::tensor::backend::Backend>::Device = Default::default();
-
-    let checkpoint_path = checkpoint.map(PathBuf::from).or_else(|| {
-        config
-            .training
-            .checkpoint_dir
-            .as_ref()
-            .and_then(|dir| find_latest_checkpoint(&PathBuf::from(dir)))
-    });
-
-    let model: DPSN<B::InnerBackend> = if let Some(ref ckpt_path) = checkpoint_path {
-        println!("Loading model from checkpoint: {:?}\n", ckpt_path);
-        let fresh_model: DPSN<B::InnerBackend> = DPSN::new(
-            dataset.vocab_size(),
-            config.model.embed_dim,
-            config.model.pool_size,
-            config.model.k_min,
-            config.model.k_max,
-            config.model.router_hidden_dim,
-            config.model.context_length,
-            config.model.exploration_noise,
-            &device,
-        );
-        match load_checkpoint(fresh_model, ckpt_path, &device) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("Failed to load checkpoint: {}. Training new model...", e);
-                train_fresh_model::<B>(config, &dataset, &device, device_location)
-            }
-        }
-    } else {
-        println!("No checkpoint found. Training new model...\n");
-        train_fresh_model::<B>(config, &dataset, &device, device_location)
-    };
-
-    let generator = TextGenerator::new(&model, &dataset.tokenizer, device);
-    let generated = generator.generate(
-        prompt,
-        config.inference.max_tokens,
-        config.inference.temperature,
-    );
-
-    println!("\n=== Generated Text ===\n");
-    println!("{}", generated);
-}
-
-fn train_fresh_model<B: burn::tensor::backend::AutodiffBackend>(
-    config: &FullConfig,
-    dataset: &CharDataset,
-    device: &<B::InnerBackend as burn::tensor::backend::Backend>::Device,
-    device_location: DeviceLocation,
-) -> DPSN<B::InnerBackend> {
-    let training_config = TrainingConfig::new()
-        .with_num_steps(config.training.num_steps)
-        .with_batch_size(config.training.batch_size)
-        .with_learning_rate(config.training.learning_rate);
-
-    let curriculum_config = CurriculumConfig::new()
-        .with_warmup_steps(config.curriculum.warmup_steps)
-        .with_specialization_steps(config.curriculum.specialization_steps);
-
-    train_with_curriculum::<B>(
-        training_config,
-        curriculum_config,
-        dataset.vocab_size(),
-        config.model.embed_dim,
-        config.model.pool_size,
-        config.model.k_min,
-        config.model.k_max,
-        config.model.router_hidden_dim,
-        config.model.context_length,
-        config.model.exploration_noise,
-        dataset,
-        device,
-        device_location,
-    )
 }
 
 fn run_training<B: burn::tensor::backend::AutodiffBackend>(
@@ -809,6 +809,7 @@ fn run_training<B: burn::tensor::backend::AutodiffBackend>(
     embed_dim: usize,
     k_min: usize,
     k_max: usize,
+    num_heads: usize,
     context_length: usize,
     data_dir: &str,
     device_location: DeviceLocation,
@@ -850,6 +851,7 @@ fn run_training<B: burn::tensor::backend::AutodiffBackend>(
         k_min,
         k_max,
         128,
+        num_heads,
         context_length,
         0.1,
         &dataset,
@@ -887,6 +889,7 @@ fn run_generation<B: burn::tensor::backend::AutodiffBackend>(
             50,
             500,
             64,
+            4,
             64,
             0.1,
             &device,
@@ -910,6 +913,7 @@ fn run_generation<B: burn::tensor::backend::AutodiffBackend>(
                     50,
                     500,
                     64,
+                    4, // num_heads default for hardcoded check
                     64,
                     0.1,
                     &dataset,
@@ -935,6 +939,7 @@ fn run_generation<B: burn::tensor::backend::AutodiffBackend>(
             50,
             500,
             64,
+            4,
             64,
             0.1,
             &dataset,
@@ -989,6 +994,7 @@ fn run_demo<B: burn::tensor::backend::AutodiffBackend>(device_location: DeviceLo
         20,
         200,
         64,
+        4,
         32,
         0.1,
         &dataset,

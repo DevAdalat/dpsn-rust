@@ -5,6 +5,7 @@ model:
   k_max: 400
   router_hidden_dim: 64
   context_length: 64
+  num_heads: 4
   exploration_noise: 0.1
   use_hierarchical_router: true
   num_clusters: 64

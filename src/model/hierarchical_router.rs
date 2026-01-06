@@ -182,17 +182,11 @@ impl<B: Backend> HierarchicalRouter<B> {
         };
 
         let cluster_scores = make_contiguous(cluster_scores);
-        let sorted_clusters = cluster_scores.clone().argsort_descending(1);
-        let top_cluster_indices = sorted_clusters.slice([0..batch_size, 0..self.top_clusters]);
-        let top_cluster_indices = make_contiguous_int(top_cluster_indices);
-
-        let top_cluster_data: Vec<i64> = top_cluster_indices
+        let top_cluster_indices = cluster_scores
             .clone()
-            .reshape([batch_size * self.top_clusters])
-            .into_data()
-            .convert::<i64>()
-            .to_vec()
-            .unwrap();
+            .argsort_descending(1)
+            .slice([0..batch_size, 0..self.top_clusters]);
+        let top_cluster_indices = make_contiguous_int(top_cluster_indices);
 
         let intra_scores = if noise_scale > 0.0 {
             let noise = Tensor::<B, 2>::random(
@@ -206,67 +200,33 @@ impl<B: Backend> HierarchicalRouter<B> {
         };
 
         let intra_scores = make_contiguous(intra_scores);
-        let sorted_intra = intra_scores.clone().argsort_descending(1);
 
-        let params_per_cluster = self.k_max / self.top_clusters;
-        let remainder = self.k_max % self.top_clusters;
+        let params_per_cluster = (self.k_max + self.top_clusters - 1) / self.top_clusters;
+        let params_per_cluster = params_per_cluster.min(self.cluster_size);
 
-        let mut all_indices: Vec<i64> = Vec::with_capacity(batch_size * self.k_max);
-        let mut all_scores: Vec<f32> = Vec::with_capacity(batch_size * self.pool_size);
-
-        let intra_sorted_data: Vec<i64> = sorted_intra
+        let top_intra_indices = intra_scores
             .clone()
-            .reshape([batch_size * self.cluster_size])
-            .into_data()
-            .convert::<i64>()
-            .to_vec()
-            .unwrap();
+            .argsort_descending(1)
+            .slice([0..batch_size, 0..params_per_cluster]);
+        let top_intra_indices = make_contiguous_int(top_intra_indices);
 
-        for b in 0..batch_size {
-            let mut batch_indices: Vec<i64> = Vec::with_capacity(self.k_max);
+        let cluster_base =
+            top_cluster_indices.clone().unsqueeze_dim::<3>(2) * (self.cluster_size as i64);
+        let intra_offset = top_intra_indices.unsqueeze_dim::<3>(1);
 
-            for c in 0..self.top_clusters {
-                let cluster_idx = top_cluster_data[b * self.top_clusters + c] as usize;
-                let cluster_base = cluster_idx * self.cluster_size;
+        let candidates = cluster_base + intra_offset;
+        let candidates_flat =
+            candidates.reshape([batch_size, self.top_clusters * params_per_cluster]);
 
-                let count = if c < remainder {
-                    params_per_cluster + 1
-                } else {
-                    params_per_cluster
-                };
+        let indices = candidates_flat.slice([0..batch_size, 0..self.k_max]);
 
-                for i in 0..count {
-                    if batch_indices.len() >= self.k_max {
-                        break;
-                    }
-                    let intra_idx = intra_sorted_data[b * self.cluster_size + i] as usize;
-                    let global_idx = cluster_base + intra_idx;
-                    if global_idx < self.pool_size {
-                        batch_indices.push(global_idx as i64);
-                    }
-                }
-            }
+        let zeros = Tensor::zeros_like(&indices);
+        let mask = indices.clone().greater_equal_elem(self.pool_size as i64);
+        let indices = indices.mask_where(mask, zeros);
 
-            while batch_indices.len() < self.k_max {
-                batch_indices.push(0);
-            }
+        let all_scores = Tensor::<B, 2>::zeros([batch_size, self.pool_size], device);
 
-            all_indices.extend_from_slice(&batch_indices);
-
-            for _ in 0..self.pool_size {
-                all_scores.push(0.0);
-            }
-        }
-
-        let indices = Tensor::<B, 1, Int>::from_ints(all_indices.as_slice(), device)
-            .reshape([batch_size, self.k_max]);
-        let indices = make_contiguous_int(indices);
-
-        let scores = Tensor::<B, 1>::from_floats(all_scores.as_slice(), device)
-            .reshape([batch_size, self.pool_size]);
-        let scores = make_contiguous(scores);
-
-        (indices, scores)
+        (indices, all_scores)
     }
 
     fn random_routing(
@@ -301,49 +261,26 @@ impl<B: Backend> HierarchicalRouter<B> {
         &self,
         cluster_scores: &Tensor<B, 2>,
         intra_scores: &Tensor<B, 2>,
-        device: &B::Device,
+        _device: &B::Device,
     ) -> Tensor<B, 2> {
-        let [batch_size, _] = cluster_scores.dims();
+        let [batch_size, num_clusters] = cluster_scores.dims();
+        let [_, cluster_size] = intra_scores.dims();
 
         let cluster_probs = activation::softmax(cluster_scores.clone(), 1);
         let intra_probs = activation::softmax(intra_scores.clone(), 1);
 
-        let cluster_probs_data: Vec<f32> = cluster_probs
-            .clone()
-            .reshape([batch_size * self.num_clusters])
-            .into_data()
-            .to_vec()
-            .unwrap();
+        let cluster_probs_expanded = cluster_probs.unsqueeze_dim::<3>(2);
+        let intra_probs_expanded = intra_probs.unsqueeze_dim::<3>(1);
 
-        let intra_probs_data: Vec<f32> = intra_probs
-            .clone()
-            .reshape([batch_size * self.cluster_size])
-            .into_data()
-            .to_vec()
-            .unwrap();
+        let full_probs = cluster_probs_expanded * intra_probs_expanded;
 
-        let mut full_probs: Vec<f32> = Vec::with_capacity(batch_size * self.pool_size);
+        let full_probs_flat = full_probs.reshape([batch_size, num_clusters * cluster_size]);
 
-        for b in 0..batch_size {
-            for c in 0..self.num_clusters {
-                let cluster_prob = cluster_probs_data[b * self.num_clusters + c];
-                for i in 0..self.cluster_size {
-                    let global_idx = c * self.cluster_size + i;
-                    if global_idx < self.pool_size {
-                        let intra_prob = intra_probs_data[b * self.cluster_size + i];
-                        full_probs.push(cluster_prob * intra_prob);
-                    }
-                }
-            }
-            let current_len = full_probs.len() - b * self.pool_size;
-            for _ in current_len..self.pool_size {
-                full_probs.push(0.0);
-            }
+        if num_clusters * cluster_size > self.pool_size {
+            full_probs_flat.slice([0..batch_size, 0..self.pool_size])
+        } else {
+            full_probs_flat
         }
-
-        let probs = Tensor::<B, 1>::from_floats(full_probs.as_slice(), device)
-            .reshape([batch_size, self.pool_size]);
-        make_contiguous(probs)
     }
 
     fn gather_scores(&self, scores: &Tensor<B, 2>, indices: &Tensor<B, 2, Int>) -> Tensor<B, 2> {
