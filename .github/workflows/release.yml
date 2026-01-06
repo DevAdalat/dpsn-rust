@@ -95,7 +95,7 @@ jobs:
           JOBS=$(nproc)
           echo "Building with $JOBS jobs for target ${{ matrix.target }}"
           if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
-            cargo zigbuild --release --target ${{ matrix.target }} -j $JOBS
+            SDKROOT=/tmp/MacOSX15.5.sdk cargo zigbuild --release --target ${{ matrix.target }} -j $JOBS
           else
             cargo build --release --target ${{ matrix.target }} -j $JOBS
           fi
