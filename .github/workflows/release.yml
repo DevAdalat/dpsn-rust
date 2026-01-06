@@ -76,8 +76,8 @@ jobs:
       - name: Download macOS SDK
         if: contains(matrix.target, 'apple-darwin')
         run: |
-          curl -L https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX11.3.sdk.tar.xz | tar -Jx -C /tmp
-          echo "SDKROOT=/tmp/MacOSX11.3.sdk" >> $GITHUB_ENV
+          curl -L https://github.com/joseluisq/macosx-sdks/releases/download/15.5/MacOSX15.5.sdk.tar.xz | tar -Jx -C /tmp
+          echo "SDKROOT=/tmp/MacOSX15.5.sdk" >> $GITHUB_ENV
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
