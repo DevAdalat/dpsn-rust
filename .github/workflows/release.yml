@@ -37,19 +37,19 @@ jobs:
       - id: set-matrix
         run: |
           if [ "${{ github.event.inputs.platform }}" == "linux" ]; then
-            echo 'matrix=["ubuntu-22.04"]' >> $GITHUB_OUTPUT
+            echo 'matrix=[{"os": "ubuntu-22.04", "target": "x86_64-unknown-linux-gnu"}]' >> $GITHUB_OUTPUT
           elif [ "${{ github.event.inputs.platform }}" == "macos" ]; then
-            echo 'matrix=["macos-15-intel"]' >> $GITHUB_OUTPUT
+            echo 'matrix=[{"os": "ubuntu-22.04", "target": "x86_64-apple-darwin"}]' >> $GITHUB_OUTPUT
           else
-            echo 'matrix=["ubuntu-22.04", "macos-15-intel"]' >> $GITHUB_OUTPUT
+            echo 'matrix=[{"os": "ubuntu-22.04", "target": "x86_64-unknown-linux-gnu"}, {"os": "ubuntu-22.04", "target": "x86_64-apple-darwin"}]' >> $GITHUB_OUTPUT
           fi
 
   build:
     needs: setup
-    name: Build and Release (${{ matrix.os }})
+    name: Build and Release (${{ matrix.target }})
     strategy:
       matrix:
-        os: ${{ fromJson(needs.setup.outputs.matrix) }}
+        include: ${{ fromJson(needs.setup.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -60,35 +60,53 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Zig
+        if: contains(matrix.target, 'apple-darwin')
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        if: contains(matrix.target, 'apple-darwin')
+        run: pip install cargo-zigbuild
+
+      - name: Download macOS SDK
+        if: contains(matrix.target, 'apple-darwin')
+        run: |
+          curl -L https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX11.3.sdk.tar.xz | tar -Jx -C /tmp
+          echo "SDKROOT=/tmp/MacOSX11.3.sdk" >> $GITHUB_ENV
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.os }}-cargo-release
+          key: ${{ matrix.target }}-cargo-release
 
       - name: Install Linux dependencies
-        if: matrix.os == 'ubuntu-22.04'
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
 
       - name: Build
         run: |
-          if [ "${{ matrix.os }}" = "ubuntu-22.04" ]; then
-            JOBS=$(nproc)
+          JOBS=$(nproc)
+          echo "Building with $JOBS jobs for target ${{ matrix.target }}"
+          if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
+            cargo zigbuild --release --target ${{ matrix.target }} -j $JOBS
           else
-            JOBS=$(sysctl -n hw.ncpu)
+            cargo build --release --target ${{ matrix.target }} -j $JOBS
           fi
-          echo "Building with $JOBS jobs"
-          cargo build --release -j $JOBS
 
       - name: Prepare binary
         id: prepare
         shell: bash
         run: |
           mkdir -p staging
-          cp target/release/dpsn staging/dpsn
-          if [ "${{ matrix.os }}" = "macos-15-intel" ]; then
+          cp target/${{ matrix.target }}/release/dpsn staging/dpsn
+          if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
             FILE_NAME="dpsn-apple-darwin.tar.gz"
             cd staging && tar czvf ../$FILE_NAME dpsn
           else
