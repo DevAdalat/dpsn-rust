@@ -27,6 +27,11 @@ on:
         required: false
         default: false
         type: boolean
+      cuda_version:
+        description: 'CUDA version'
+        required: true
+        default: '122'
+        type: number
 
 jobs:
   setup:
@@ -51,6 +56,8 @@ jobs:
       matrix:
         include: ${{ fromJson(needs.setup.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
+    env:
+      SDKROOT: ${{ contains(matrix.target, 'apple-darwin') && '/tmp/MacOSX15.5.sdk' || '' }}
     permissions:
       contents: write
 
@@ -77,7 +84,6 @@ jobs:
         if: contains(matrix.target, 'apple-darwin')
         run: |
           curl -L https://github.com/joseluisq/macosx-sdks/releases/download/15.5/MacOSX15.5.sdk.tar.xz | tar -Jx -C /tmp
-          echo "SDKROOT=/tmp/MacOSX15.5.sdk" >> $GITHUB_ENV
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -93,11 +99,12 @@ jobs:
       - name: Build
         run: |
           JOBS=$(nproc)
-          echo "Building with $JOBS jobs for target ${{ matrix.target }}"
+          CUDA_VERSION="${{ github.event.inputs.cuda_version }}"
+          echo "Building with $JOBS jobs for target ${{ matrix.target }} using CUDA version $CUDA_VERSION"
           if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
-            SDKROOT=/tmp/MacOSX15.5.sdk cargo zigbuild --release --target ${{ matrix.target }} -j $JOBS
+            CUDARC_CUDA_VERSION="$CUDA_VERSION" cargo zigbuild --release --target ${{ matrix.target }} -j $JOBS
           else
-            cargo build --release --target ${{ matrix.target }} -j $JOBS
+            CUDARC_CUDA_VERSION="$CUDA_VERSION" cargo build --release --target ${{ matrix.target }} -j $JOBS
           fi
 
       - name: Prepare binary

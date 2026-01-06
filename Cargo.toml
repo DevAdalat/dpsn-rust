@@ -16,7 +16,6 @@ clap = { version = "4.0", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 futures-util = "0.3"
 indicatif = "0.17"
-cudarc = { version = "0.18.2", features = ["cuda-12050"] }
 
 [profile.release]
 opt-level = "z"
