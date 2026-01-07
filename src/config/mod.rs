@@ -27,24 +27,90 @@ pub struct ModelConfig {
     pub embed_dim: usize,
     #[serde(default = "default_pool_size")]
     pub pool_size: usize,
+    #[serde(default = "default_num_heads")]
+    pub num_heads: usize,
+    #[serde(default = "default_context_length")]
+    pub context_length: usize,
+    #[serde(default)]
+    pub router: RouterSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum RouterSettings {
+    Standard(StandardRouterSettings),
+    Hierarchical(HierarchicalRouterSettings),
+}
+
+impl Default for RouterSettings {
+    fn default() -> Self {
+        RouterSettings::Standard(StandardRouterSettings::default())
+    }
+}
+
+impl RouterSettings {
+    pub fn as_standard(&self) -> Option<&StandardRouterSettings> {
+        match self {
+            RouterSettings::Standard(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn as_hierarchical(&self) -> Option<&HierarchicalRouterSettings> {
+        match self {
+            RouterSettings::Hierarchical(h) => Some(h),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StandardRouterSettings {
     #[serde(default = "default_k_min")]
     pub k_min: usize,
     #[serde(default = "default_k_max")]
     pub k_max: usize,
     #[serde(default = "default_router_hidden_dim")]
-    pub router_hidden_dim: usize,
-    #[serde(default = "default_context_length")]
-    pub context_length: usize,
+    pub hidden_dim: usize,
     #[serde(default = "default_exploration_noise")]
     pub exploration_noise: f64,
-    #[serde(default)]
-    pub use_hierarchical_router: bool,
+}
+
+impl Default for StandardRouterSettings {
+    fn default() -> Self {
+        StandardRouterSettings {
+            k_min: default_k_min(),
+            k_max: default_k_max(),
+            hidden_dim: default_router_hidden_dim(),
+            exploration_noise: default_exploration_noise(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HierarchicalRouterSettings {
+    #[serde(default = "default_k_min")]
+    pub k_min: usize,
+    #[serde(default = "default_k_max")]
+    pub k_max: usize,
     #[serde(default = "default_num_clusters")]
     pub num_clusters: usize,
     #[serde(default = "default_top_clusters")]
     pub top_clusters: usize,
-    #[serde(default = "default_num_heads")]
-    pub num_heads: usize,
+    #[serde(default = "default_exploration_noise")]
+    pub exploration_noise: f64,
+}
+
+impl Default for HierarchicalRouterSettings {
+    fn default() -> Self {
+        HierarchicalRouterSettings {
+            k_min: default_k_min(),
+            k_max: default_k_max(),
+            num_clusters: default_num_clusters(),
+            top_clusters: default_top_clusters(),
+            exploration_noise: default_exploration_noise(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,15 +332,9 @@ impl FullConfig {
                 vocab_size: None,
                 embed_dim: 64,
                 pool_size: 20000,
-                k_min: 100,
-                k_max: 5000,
-                router_hidden_dim: 128,
-                context_length: 64,
-                exploration_noise: 0.1,
-                use_hierarchical_router: false,
-                num_clusters: 32,
-                top_clusters: 4,
                 num_heads: 4,
+                context_length: 64,
+                router: RouterSettings::Standard(StandardRouterSettings::default()),
             },
             training: TrainingSettings {
                 num_steps: Some(500),
@@ -310,15 +370,14 @@ impl FullConfig {
                 vocab_size: None,
                 embed_dim: 32,
                 pool_size: 2000,
-                k_min: 20,
-                k_max: 200,
-                router_hidden_dim: 64,
-                context_length: 32,
-                exploration_noise: 0.1,
-                use_hierarchical_router: false,
-                num_clusters: 32,
-                top_clusters: 4,
                 num_heads: 4,
+                context_length: 32,
+                router: RouterSettings::Standard(StandardRouterSettings {
+                    k_min: 20,
+                    k_max: 200,
+                    hidden_dim: 64,
+                    exploration_noise: 0.1,
+                }),
             },
             training: TrainingSettings {
                 num_steps: Some(100),
@@ -358,15 +417,15 @@ impl FullConfig {
                 vocab_size: None,
                 embed_dim: 64,
                 pool_size: 10000,
-                k_min: 50,
-                k_max: 1000,
-                router_hidden_dim: 128,
-                context_length: 128,
-                exploration_noise: 0.1,
-                use_hierarchical_router: true,
-                num_clusters: 64,
-                top_clusters: 8,
                 num_heads: 8,
+                context_length: 128,
+                router: RouterSettings::Hierarchical(HierarchicalRouterSettings {
+                    k_min: 50,
+                    k_max: 1000,
+                    num_clusters: 64,
+                    top_clusters: 8,
+                    exploration_noise: 0.1,
+                }),
             },
             training: TrainingSettings {
                 num_steps: Some(1000),

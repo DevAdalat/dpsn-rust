@@ -6,9 +6,13 @@ use burn::backend::Autodiff;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-use dpsn::config::{DevicePlacement, DeviceType, FullConfig};
+use dpsn::config::{
+    DevicePlacement, DeviceType, FullConfig, HierarchicalRouterSettings, RouterSettings,
+    StandardRouterSettings,
+};
 use dpsn::data::{download_tiny_shakespeare, load_dataset_from_config, CharDataset};
 use dpsn::inference::TextGenerator;
+use dpsn::model::config::{HierarchicalRouterConfig, StandardRouterConfig};
 use dpsn::model::{DeviceLocation, DPSN};
 use dpsn::training::{
     find_latest_checkpoint, load_checkpoint, train_hierarchical, train_with_curriculum,
@@ -636,22 +640,39 @@ fn run_generate_with_config<B: burn::tensor::backend::AutodiffBackend>(
 
     let model: DPSN<B::InnerBackend> = if let Some(ckpt_path) = checkpoint {
         println!("Loading model from checkpoint: {}\n", ckpt_path);
-        let fresh_model: DPSN<B::InnerBackend> = DPSN::new(
-            dataset.vocab_size(),
-            config.model.embed_dim,
-            config.model.pool_size,
-            config.model.k_min,
-            config.model.k_max,
-            config.model.router_hidden_dim,
-            config.model.num_heads,
-            config.model.context_length,
-            config.model.exploration_noise,
-            &device,
-        );
+        let fresh_model: DPSN<B::InnerBackend> = match &config.model.router {
+            RouterSettings::Standard(s) => {
+                let router_config = StandardRouterConfig {
+                    k_min: s.k_min,
+                    k_max: s.k_max,
+                    hidden_dim: s.hidden_dim,
+                    exploration_noise: s.exploration_noise,
+                };
+                DPSN::new(
+                    dataset.vocab_size(),
+                    config.model.embed_dim,
+                    config.model.pool_size,
+                    config.model.num_heads,
+                    config.model.context_length,
+                    router_config,
+                    &device,
+                )
+            }
+            _ => {
+                panic!("Only Standard router supported in checkpoing loading for now in this path")
+            }
+        };
         match load_checkpoint(fresh_model, &PathBuf::from(ckpt_path), &device) {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("Failed to load checkpoint: {}. Training new model...", e);
+                // Fallback to training
+                let router_config = StandardRouterConfig {
+                    k_min: config.model.router.as_standard().unwrap().k_min,
+                    k_max: config.model.router.as_standard().unwrap().k_max,
+                    hidden_dim: config.model.router.as_standard().unwrap().hidden_dim,
+                    exploration_noise: config.model.router.as_standard().unwrap().exploration_noise,
+                };
                 train_with_curriculum::<B>(
                     TrainingConfig::new()
                         .with_num_steps(config.training.num_steps)
@@ -662,12 +683,9 @@ fn run_generate_with_config<B: burn::tensor::backend::AutodiffBackend>(
                     dataset.vocab_size(),
                     config.model.embed_dim,
                     config.model.pool_size,
-                    config.model.k_min,
-                    config.model.k_max,
-                    config.model.router_hidden_dim,
+                    router_config,
                     config.model.num_heads,
                     config.model.context_length,
-                    config.model.exploration_noise,
                     &dataset,
                     &device,
                     device_location,
@@ -676,6 +694,12 @@ fn run_generate_with_config<B: burn::tensor::backend::AutodiffBackend>(
         }
     } else {
         println!("No checkpoint provided. Running training as per config...\n");
+        let router_config = StandardRouterConfig {
+            k_min: config.model.router.as_standard().unwrap().k_min,
+            k_max: config.model.router.as_standard().unwrap().k_max,
+            hidden_dim: config.model.router.as_standard().unwrap().hidden_dim,
+            exploration_noise: config.model.router.as_standard().unwrap().exploration_noise,
+        };
         train_with_curriculum::<B>(
             TrainingConfig::new()
                 .with_num_steps(config.training.num_steps)
@@ -686,12 +710,9 @@ fn run_generate_with_config<B: burn::tensor::backend::AutodiffBackend>(
             dataset.vocab_size(),
             config.model.embed_dim,
             config.model.pool_size,
-            config.model.k_min,
-            config.model.k_max,
-            config.model.router_hidden_dim,
+            router_config,
             config.model.num_heads,
             config.model.context_length,
-            config.model.exploration_noise,
             &dataset,
             &device,
             device_location,
@@ -759,21 +780,25 @@ fn run_training_from_config<B: burn::tensor::backend::AutodiffBackend>(
 
     let device = Default::default();
 
-    if config.model.use_hierarchical_router {
+    if let RouterSettings::Hierarchical(h_config) = &config.model.router {
         println!("Using HIERARCHICAL router (reduced parameter count)\n");
+        let router_config = HierarchicalRouterConfig {
+            k_min: h_config.k_min,
+            k_max: h_config.k_max,
+            num_clusters: h_config.num_clusters,
+            top_clusters: h_config.top_clusters,
+            exploration_noise: h_config.exploration_noise,
+        };
+
         let model = train_hierarchical::<B>(
             training_config,
             curriculum_config,
             dataset.vocab_size(),
             config.model.embed_dim,
             config.model.pool_size,
-            config.model.k_min,
-            config.model.k_max,
-            config.model.num_clusters,
-            config.model.top_clusters,
+            router_config,
             config.model.num_heads,
             config.model.context_length,
-            config.model.exploration_noise,
             &dataset,
             &device,
             device_location,
@@ -789,18 +814,28 @@ fn run_training_from_config<B: burn::tensor::backend::AutodiffBackend>(
         );
         println!("{}", generated);
     } else {
+        // Standard Router
+        let s_config = match &config.model.router {
+            RouterSettings::Standard(s) => s,
+            _ => unreachable!(),
+        };
+
+        let router_config = StandardRouterConfig {
+            k_min: s_config.k_min,
+            k_max: s_config.k_max,
+            hidden_dim: s_config.hidden_dim,
+            exploration_noise: s_config.exploration_noise,
+        };
+
         let model = train_with_curriculum::<B>(
             training_config,
             curriculum_config,
             dataset.vocab_size(),
             config.model.embed_dim,
             config.model.pool_size,
-            config.model.k_min,
-            config.model.k_max,
-            config.model.router_hidden_dim,
+            router_config,
             config.model.num_heads,
             config.model.context_length,
-            config.model.exploration_noise,
             &dataset,
             &device,
             device_location,
@@ -851,18 +886,22 @@ fn run_training<B: burn::tensor::backend::AutodiffBackend>(
 
     let device = Default::default();
 
+    let router_config = StandardRouterConfig {
+        k_min,
+        k_max,
+        hidden_dim: router_hidden_dim,
+        exploration_noise: 0.1,
+    };
+
     let model = train_with_curriculum::<B>(
         training_config,
         curriculum_config,
         dataset.vocab_size(),
         embed_dim,
         pool_size,
-        k_min,
-        k_max,
-        router_hidden_dim,
+        router_config,
         num_heads,
         context_length,
-        0.1,
         &dataset,
         &device,
         device_location,
@@ -891,16 +930,19 @@ fn run_generation<B: burn::tensor::backend::AutodiffBackend>(
 
     let model: DPSN<B::InnerBackend> = if let Some(ckpt_path) = checkpoint {
         println!("Loading model from checkpoint: {}\n", ckpt_path);
+        let router_config = StandardRouterConfig {
+            k_min: 50,
+            k_max: 500,
+            hidden_dim: 64,
+            exploration_noise: 0.1,
+        };
         let fresh_model: DPSN<B::InnerBackend> = DPSN::new(
             dataset.vocab_size(),
             64,
             5000,
-            50,
-            500,
-            64,
             4,
             64,
-            0.1,
+            router_config,
             &device,
         );
         match load_checkpoint(fresh_model, &PathBuf::from(ckpt_path), &device) {
@@ -913,18 +955,21 @@ fn run_generation<B: burn::tensor::backend::AutodiffBackend>(
                 let curriculum_config = CurriculumConfig::new()
                     .with_warmup_steps(20)
                     .with_specialization_steps(60);
+                let router_config = StandardRouterConfig {
+                    k_min: 50,
+                    k_max: 500,
+                    hidden_dim: 64,
+                    exploration_noise: 0.1,
+                };
                 train_with_curriculum::<B>(
                     training_config,
                     curriculum_config,
                     dataset.vocab_size(),
                     64,
                     5000,
-                    50,
-                    500,
-                    64,
+                    router_config,
                     4, // num_heads default for hardcoded check
                     64,
-                    0.1,
                     &dataset,
                     &device,
                     device_location,
@@ -939,18 +984,21 @@ fn run_generation<B: burn::tensor::backend::AutodiffBackend>(
         let curriculum_config = CurriculumConfig::new()
             .with_warmup_steps(20)
             .with_specialization_steps(60);
+        let router_config = StandardRouterConfig {
+            k_min: 50,
+            k_max: 500,
+            hidden_dim: 64,
+            exploration_noise: 0.1,
+        };
         train_with_curriculum::<B>(
             training_config,
             curriculum_config,
             dataset.vocab_size(),
             64,
             5000,
-            50,
-            500,
-            64,
+            router_config,
             4,
             64,
-            0.1,
             &dataset,
             &device,
             device_location,
@@ -994,18 +1042,22 @@ fn run_demo<B: burn::tensor::backend::AutodiffBackend>(device_location: DeviceLo
 
     let device = Default::default();
 
+    let router_config = StandardRouterConfig {
+        k_min: 20,
+        k_max: 200,
+        hidden_dim: 64,
+        exploration_noise: 0.1,
+    };
+
     let model = train_with_curriculum::<B>(
         training_config,
         curriculum_config,
         dataset.vocab_size(),
         32,
         2000,
-        20,
-        200,
-        64,
+        router_config,
         4,
         32,
-        0.1,
         &dataset,
         &device,
         device_location,

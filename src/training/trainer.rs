@@ -11,7 +11,9 @@ const NAN_PATIENCE: usize = 3;
 use super::checkpoint::{save_checkpoint, save_hierarchical_checkpoint};
 use super::curriculum::{CurriculumConfig, TrainingPhase};
 use crate::data::batcher::DPSNBatcher;
-use crate::data::dataset::{CharDataset, DataLoader};
+use crate::data::dataset::CharDataset;
+use crate::data::prefetcher::DataPrefetcher;
+use crate::model::config::{HierarchicalRouterConfig, StandardRouterConfig};
 use crate::model::dpsn::{DeviceLocation, HierarchicalDPSN, Precision, DPSN};
 use crate::model::router::RoutingMode;
 
@@ -204,12 +206,9 @@ pub fn train<B: AutodiffBackend>(
     vocab_size: usize,
     embed_dim: usize,
     pool_size: usize,
-    k_min: usize,
-    k_max: usize,
-    router_hidden_dim: usize,
+    router_config: StandardRouterConfig,
     num_heads: usize,
     context_length: usize,
-    exploration_noise: f64,
     dataset: &CharDataset,
     device: &B::Device,
     device_location: DeviceLocation,
@@ -221,12 +220,9 @@ pub fn train<B: AutodiffBackend>(
         vocab_size,
         embed_dim,
         pool_size,
-        k_min,
-        k_max,
-        router_hidden_dim,
+        router_config,
         num_heads,
         context_length,
-        exploration_noise,
         dataset,
         device,
         device_location,
@@ -239,12 +235,9 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
     vocab_size: usize,
     embed_dim: usize,
     pool_size: usize,
-    k_min: usize,
-    k_max: usize,
-    router_hidden_dim: usize,
+    router_config: StandardRouterConfig,
     num_heads: usize,
     context_length: usize,
-    exploration_noise: f64,
 
     dataset: &CharDataset,
     device: &B::Device,
@@ -254,18 +247,15 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
         vocab_size,
         embed_dim,
         pool_size,
-        k_min,
-        k_max,
-        router_hidden_dim,
         num_heads,
         context_length,
-        exploration_noise,
+        router_config.clone(),
         device,
     );
 
     let mut optimizer = AdamConfig::new().init();
     let batcher = DPSNBatcher::new(context_length);
-    let mut dataloader = DataLoader::new(dataset, config.batch_size, true);
+    let prefetcher = DataPrefetcher::new(dataset.clone(), config.batch_size, true, 4);
 
     let stats = model.param_stats();
     stats.print_summary("DPSN", device_location, Precision::F32);
@@ -326,7 +316,9 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
             last_phase = schedule.phase;
         }
 
-        let (inputs, targets) = dataloader.next_batch();
+        let (inputs, targets) = prefetcher
+            .next()
+            .expect("Data prefetcher channel closed unexpectedly");
         let batch = batcher.batch::<B>(inputs, targets, device);
 
         let routing_mode = get_routing_mode(&schedule);
@@ -346,7 +338,7 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
             output.router_output.routing_probs.clone(),
             output.router_output.all_scores.clone(),
             &output.router_output.budget,
-            k_max,
+            router_config.k_max,
             pool_size,
         );
 
@@ -480,13 +472,9 @@ pub fn train_hierarchical<B: AutodiffBackend>(
     vocab_size: usize,
     embed_dim: usize,
     pool_size: usize,
-    k_min: usize,
-    k_max: usize,
-    num_clusters: usize,
-    top_clusters: usize,
+    router_config: HierarchicalRouterConfig,
     num_heads: usize,
     context_length: usize,
-    exploration_noise: f64,
     dataset: &CharDataset,
     device: &B::Device,
     device_location: DeviceLocation,
@@ -495,18 +483,14 @@ pub fn train_hierarchical<B: AutodiffBackend>(
         vocab_size,
         embed_dim,
         pool_size,
-        k_min,
-        k_max,
-        num_clusters,
-        top_clusters,
         num_heads,
         context_length,
-        exploration_noise,
+        router_config.clone(),
         device,
     );
     let mut optimizer = AdamConfig::new().init();
     let batcher = DPSNBatcher::new(context_length);
-    let mut dataloader = DataLoader::new(dataset, config.batch_size, true);
+    let prefetcher = DataPrefetcher::new(dataset.clone(), config.batch_size, true, 4);
 
     let stats = model.param_stats();
     stats.print_summary("Hierarchical DPSN", device_location, Precision::F32);
@@ -570,7 +554,9 @@ pub fn train_hierarchical<B: AutodiffBackend>(
             last_phase = schedule.phase;
         }
 
-        let (inputs, targets) = dataloader.next_batch();
+        let (inputs, targets) = prefetcher
+            .next()
+            .expect("Data prefetcher channel closed unexpectedly");
         let batch = batcher.batch::<B>(inputs, targets, device);
 
         let routing_mode = get_routing_mode(&schedule);
@@ -590,7 +576,7 @@ pub fn train_hierarchical<B: AutodiffBackend>(
             output.router_output.routing_probs.clone(),
             output.router_output.all_scores.clone(),
             &output.router_output.budget,
-            k_max,
+            router_config.k_max,
             pool_size,
         );
 

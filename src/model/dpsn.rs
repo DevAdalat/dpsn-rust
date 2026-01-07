@@ -6,6 +6,7 @@ use burn::nn::{Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, L
 use burn::prelude::*;
 use burn::tensor::backend::Backend;
 
+use super::config::{HierarchicalRouterConfig as HRouterConfig, StandardRouterConfig};
 use super::execution_engine::{ExecutionEngine, ExecutionEngineConfig};
 use super::hierarchical_router::{HierarchicalRouter, HierarchicalRouterConfig};
 use super::parameter_pool::{ParameterPool, ParameterPoolConfig};
@@ -49,12 +50,9 @@ impl<B: Backend> DPSN<B> {
         vocab_size: usize,
         embed_dim: usize,
         pool_size: usize,
-        k_min: usize,
-        k_max: usize,
-        router_hidden_dim: usize,
         num_heads: usize,
         context_length: usize,
-        exploration_noise: f64,
+        router_config: StandardRouterConfig,
         device: &B::Device,
     ) -> Self {
         let embedding = EmbeddingConfig::new(vocab_size, embed_dim).init(device);
@@ -67,11 +65,11 @@ impl<B: Backend> DPSN<B> {
 
         let router = RouterConfig {
             embed_dim,
-            hidden_dim: router_hidden_dim,
+            hidden_dim: router_config.hidden_dim,
             pool_size,
-            k_min,
-            k_max,
-            noise_scale: exploration_noise,
+            k_min: router_config.k_min,
+            k_max: router_config.k_max,
+            noise_scale: router_config.exploration_noise,
         }
         .init(device);
 
@@ -81,7 +79,11 @@ impl<B: Backend> DPSN<B> {
         }
         .init(device);
 
-        let engine = ExecutionEngineConfig { embed_dim, k_max }.init(device);
+        let engine = ExecutionEngineConfig {
+            embed_dim,
+            k_max: router_config.k_max,
+        }
+        .init(device);
 
         let output_head = LinearConfig::new(embed_dim, vocab_size).init(device);
 
@@ -97,9 +99,9 @@ impl<B: Backend> DPSN<B> {
             vocab_size,
             embed_dim,
             pool_size,
-            k_min,
-            k_max,
-            router_hidden_dim,
+            k_min: router_config.k_min,
+            k_max: router_config.k_max,
+            router_hidden_dim: router_config.hidden_dim,
             num_heads,
             context_length,
         }
@@ -215,13 +217,9 @@ impl<B: Backend> HierarchicalDPSN<B> {
         vocab_size: usize,
         embed_dim: usize,
         pool_size: usize,
-        k_min: usize,
-        k_max: usize,
-        num_clusters: usize,
-        top_clusters: usize,
         num_heads: usize,
         context_length: usize,
-        exploration_noise: f64,
+        router_config: HRouterConfig,
         device: &B::Device,
     ) -> Self {
         let embedding = EmbeddingConfig::new(vocab_size, embed_dim).init(device);
@@ -235,11 +233,11 @@ impl<B: Backend> HierarchicalDPSN<B> {
         let router = HierarchicalRouterConfig {
             embed_dim,
             pool_size,
-            num_clusters,
-            top_clusters,
-            k_min,
-            k_max,
-            noise_scale: exploration_noise,
+            num_clusters: router_config.num_clusters,
+            top_clusters: router_config.top_clusters,
+            k_min: router_config.k_min,
+            k_max: router_config.k_max,
+            noise_scale: router_config.exploration_noise,
         }
         .init(device);
 
@@ -249,7 +247,11 @@ impl<B: Backend> HierarchicalDPSN<B> {
         }
         .init(device);
 
-        let engine = ExecutionEngineConfig { embed_dim, k_max }.init(device);
+        let engine = ExecutionEngineConfig {
+            embed_dim,
+            k_max: router_config.k_max,
+        }
+        .init(device);
 
         let output_head = LinearConfig::new(embed_dim, vocab_size).init(device);
 
@@ -265,9 +267,9 @@ impl<B: Backend> HierarchicalDPSN<B> {
             vocab_size,
             embed_dim,
             pool_size,
-            k_min,
-            k_max,
-            num_clusters,
+            k_min: router_config.k_min,
+            k_max: router_config.k_max,
+            num_clusters: router_config.num_clusters,
             num_heads,
             context_length,
         }

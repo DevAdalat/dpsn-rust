@@ -4,6 +4,7 @@ use std::path::Path;
 
 use super::tokenizer::CharTokenizer;
 use crate::config::{DatasetConfig, DatasetSource, HuggingFaceConfig};
+use rayon::prelude::*;
 
 const TINY_SHAKESPEARE_URL: &str =
     "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt";
@@ -247,27 +248,25 @@ impl<'a> DataLoader<'a> {
     }
 
     pub fn next_batch(&mut self) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
-        let mut inputs = Vec::with_capacity(self.batch_size);
-        let mut targets = Vec::with_capacity(self.batch_size);
-
-        for _ in 0..self.batch_size {
-            if self.position >= self.indices.len() {
-                self.position = 0;
-                if self.shuffle {
-                    use rand::seq::SliceRandom;
-                    let mut rng = rand::thread_rng();
-                    self.indices.shuffle(&mut rng);
-                }
+        if self.position + self.batch_size > self.indices.len() {
+            self.position = 0;
+            if self.shuffle {
+                use rand::seq::SliceRandom;
+                let mut rng = rand::thread_rng();
+                self.indices.shuffle(&mut rng);
             }
-
-            let idx = self.indices[self.position];
-            if let Some((input, target)) = self.dataset.get_sample(idx) {
-                inputs.push(input);
-                targets.push(target);
-            }
-            self.position += 1;
         }
 
+        let batch_indices = &self.indices[self.position..self.position + self.batch_size];
+        self.position += self.batch_size;
+
+        let results: Vec<(Vec<usize>, Vec<usize>)> = batch_indices
+            .par_iter()
+            .map(|&idx| self.dataset.get_sample(idx))
+            .flatten()
+            .collect();
+
+        let (inputs, targets): (Vec<Vec<usize>>, Vec<Vec<usize>>) = results.into_iter().unzip();
         (inputs, targets)
     }
 }
