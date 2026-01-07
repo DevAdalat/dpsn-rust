@@ -106,7 +106,6 @@ jobs:
           else
             CUDARC_CUDA_VERSION="$CUDA_VERSION" cargo build --release --target ${{ matrix.target }} -j $JOBS
           fi
-
       - name: Prepare binary
         id: prepare
         shell: bash
