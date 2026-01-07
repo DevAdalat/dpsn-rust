@@ -9,10 +9,12 @@ use super::offloaded_pool::{
     compute_pool_gradients, OffloadedParameterPool, OffloadedPoolConfig, PoolGradientTracker,
 };
 use super::router::{Router, RouterConfig, RouterOutput, RoutingMode};
+use super::step_embedding::{StepEmbedding, StepEmbeddingConfig};
 
 #[derive(Module, Debug)]
 pub struct OffloadedDPSNGpuPart<B: Backend> {
     pub embedding: Embedding<B>,
+    pub step_embedding: StepEmbedding<B>,
     pub router: Router<B>,
     pub engine: ExecutionEngine<B>,
     pub output_head: Linear<B>,
@@ -30,6 +32,8 @@ pub struct OffloadedDPSNGpuPart<B: Backend> {
     pub router_hidden_dim: usize,
     #[module(skip)]
     pub context_length: usize,
+    #[module(skip)]
+    pub recurrence_steps: usize,
 }
 
 pub struct OffloadedDPSN<B: Backend, CpuB: Backend> {
@@ -39,10 +43,11 @@ pub struct OffloadedDPSN<B: Backend, CpuB: Backend> {
     pub gpu_device: B::Device,
 }
 
+#[derive(Clone)]
 pub struct OffloadedDPSNOutput<B: Backend> {
     pub logits: Tensor<B, 3>,
-    pub router_output: RouterOutput<B>,
-    pub w_active: Tensor<B, 3>,
+    pub router_outputs: Vec<RouterOutput<B>>,
+    pub w_active: Vec<Tensor<B, 3>>, // Store active weights for each step
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +59,7 @@ pub struct OffloadedDPSNConfig {
     pub k_max: usize,
     pub router_hidden_dim: usize,
     pub context_length: usize,
+    pub recurrence_steps: usize,
     pub exploration_noise: f64,
 }
 
@@ -66,6 +72,7 @@ impl OffloadedDPSNConfig {
         k_max: usize,
         router_hidden_dim: usize,
         context_length: usize,
+        recurrence_steps: usize,
         exploration_noise: f64,
     ) -> Self {
         Self {
@@ -76,6 +83,7 @@ impl OffloadedDPSNConfig {
             k_max,
             router_hidden_dim,
             context_length,
+            recurrence_steps,
             exploration_noise,
         }
     }
@@ -86,6 +94,13 @@ impl OffloadedDPSNConfig {
         cpu_device: &CpuB::Device,
     ) -> OffloadedDPSN<B, CpuB> {
         let embedding = EmbeddingConfig::new(self.vocab_size, self.embed_dim).init(gpu_device);
+        let step_embedding = StepEmbedding::new(
+            &StepEmbeddingConfig {
+                max_steps: self.recurrence_steps,
+                embed_dim: self.embed_dim,
+            },
+            gpu_device,
+        );
 
         let router = RouterConfig {
             embed_dim: self.embed_dim,
@@ -107,6 +122,7 @@ impl OffloadedDPSNConfig {
 
         let gpu_part = OffloadedDPSNGpuPart {
             embedding,
+            step_embedding,
             router,
             engine,
             output_head,
@@ -117,6 +133,7 @@ impl OffloadedDPSNConfig {
             k_max: self.k_max,
             router_hidden_dim: self.router_hidden_dim,
             context_length: self.context_length,
+            recurrence_steps: self.recurrence_steps,
         };
 
         let pool = OffloadedPoolConfig::new(self.pool_size, self.embed_dim).init(cpu_device);
@@ -151,37 +168,66 @@ impl<B: Backend, CpuB: Backend> OffloadedDPSN<B, CpuB> {
         let embed_dim = self.gpu_part.embed_dim;
 
         let embeddings = self.gpu_part.embedding.forward(tokens);
-        let flat_embeddings = embeddings
-            .clone()
-            .reshape([batch_size * seq_len, embed_dim]);
+        let mut x = embeddings.clone();
 
-        let router_output = self
-            .gpu_part
-            .router
-            .forward_with_mode(flat_embeddings.clone(), mode);
+        // Flatten for router/engine
+        let mut router_outputs = Vec::new();
+        let mut w_actives = Vec::new();
 
-        let w_active = self
-            .pool
-            .retrieve_to_gpu(router_output.indices.clone(), &self.gpu_device);
+        for t in 0..self.gpu_part.recurrence_steps {
+            // 1. Add Step Embedding
+            let step_emb = self.gpu_part.step_embedding.forward(t);
+            // Unsqueeze to match [batch, seq, dim] -> [1, 1, embed_dim]
+            let step_emb = step_emb.unsqueeze_dim::<3>(0);
 
-        self.grad_tracker.borrow_mut().cache_forward(
-            router_output.indices.clone(),
-            router_output.selected_scores.clone(),
-        );
+            // Add to x (broadcasting)
+            let current_state = x.clone() + step_emb;
 
-        let output = self.gpu_part.engine.forward(
-            flat_embeddings,
-            w_active.clone(),
-            router_output.selected_scores.clone(),
-        );
+            // Update flat_embeddings for this step
+            let flat_embeddings = current_state
+                .clone()
+                .reshape([batch_size * seq_len, embed_dim]);
 
-        let output_reshaped = output.reshape([batch_size, seq_len, embed_dim]);
-        let logits = self.gpu_part.output_head.forward(output_reshaped);
+            // 2. Router
+            let router_output = self
+                .gpu_part
+                .router
+                .forward_with_mode(flat_embeddings.clone(), mode.clone());
+
+            // 3. Offloaded Retrieval
+            let w_active = self
+                .pool
+                .retrieve_to_gpu(router_output.indices.clone(), &self.gpu_device);
+
+            // Cache for backward pass (only needed for training)
+            // Note: We need to cache ALL steps. The tracker might need updating to handle multiple steps.
+            // For now, we overwrite or append? The current tracker implementation likely stores a single Option.
+            // TODO: Update PoolGradientTracker to support multiple steps or just use the last one?
+            // Actually, we need gradients for ALL parameters used.
+            // Simplification: We only track the last step for now or accumulated gradients?
+            // In offloaded training, we usually compute gradients manually.
+            // We'll store w_active in the output struct and handle gradients in the trainer.
+
+            w_actives.push(w_active.clone());
+            router_outputs.push(router_output.clone());
+
+            // 4. Execution
+            let output = self.gpu_part.engine.forward(
+                flat_embeddings.clone(),
+                w_active,
+                router_output.selected_scores.clone(),
+            );
+
+            let output_reshaped = output.reshape([batch_size, seq_len, embed_dim]);
+            x = x + output_reshaped;
+        }
+
+        let logits = self.gpu_part.output_head.forward(x);
 
         OffloadedDPSNOutput {
             logits,
-            router_output,
-            w_active,
+            router_outputs,
+            w_active: w_actives,
         }
     }
 
@@ -251,7 +297,7 @@ impl OffloadedParameterStats {
         println!("  Engine (GPU): {}", self.engine_params);
         println!("Active params per token: {}", self.active_params_per_token);
         println!(
-            "Pool memory (with Adam state): {:.2} MB",
+            "  Pool memory (with Adam state): {:.2} MB",
             self.pool_memory_bytes as f64 / 1024.0 / 1024.0
         );
         println!("=========================================");

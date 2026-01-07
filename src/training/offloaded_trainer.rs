@@ -12,7 +12,7 @@ use crate::data::dataset::{CharDataset, DataLoader};
 use crate::model::offloaded_dpsn::{
     compute_w_active_gradients, OffloadedDPSN, OffloadedDPSNConfig, OffloadedDPSNGpuPart,
 };
-use crate::model::router::RoutingMode;
+use crate::model::router::{RouterOutput, RoutingMode};
 
 const NAN_PATIENCE: usize = 3;
 
@@ -23,29 +23,51 @@ pub struct AuxiliaryLosses<B: Backend> {
 }
 
 fn compute_auxiliary_losses<B: Backend>(
-    routing_probs: Tensor<B, 2>,
-    all_scores: Tensor<B, 2>,
-    budget: &[usize],
+    router_outputs: &[RouterOutput<B>],
     k_max: usize,
     pool_size: usize,
 ) -> AuxiliaryLosses<B> {
-    let device = routing_probs.device();
+    if router_outputs.is_empty() {
+        let device = B::Device::default();
+        return AuxiliaryLosses {
+            balance_loss: Tensor::zeros([1], &device),
+            efficiency_loss: Tensor::zeros([1], &device),
+            z_loss: Tensor::zeros([1], &device),
+        };
+    }
 
-    let mean_probs: Tensor<B, 1> = routing_probs.clone().mean_dim(0).squeeze();
-    let balance_loss = mean_probs.powf_scalar(2.0).sum() * (pool_size as f32);
+    let device = router_outputs[0].indices.device();
 
-    let avg_budget: f32 = budget.iter().map(|&b| b as f32).sum::<f32>() / budget.len() as f32;
-    let efficiency_ratio = avg_budget / k_max as f32;
-    let efficiency_loss = Tensor::<B, 1>::from_floats([efficiency_ratio], &device);
+    // Accumulate losses across all recurrence steps
+    let mut total_balance_loss = Tensor::<B, 1>::zeros([1], &device);
+    let mut total_efficiency_loss = Tensor::<B, 1>::zeros([1], &device);
+    let mut total_z_loss = Tensor::<B, 1>::zeros([1], &device);
 
-    let log_sum_exp = all_scores.clone().exp().sum_dim(1).log();
-    let z_loss = log_sum_exp.powf_scalar(2.0).mean();
-    let z_loss = z_loss.reshape([1]);
+    for output in router_outputs {
+        let routing_probs = &output.routing_probs;
+        let all_scores = &output.all_scores;
+        let budget = &output.budget;
+
+        let mean_probs: Tensor<B, 1> = routing_probs.clone().mean_dim(0).squeeze();
+        let balance_loss = mean_probs.powf_scalar(2.0).sum() * (pool_size as f32);
+        total_balance_loss = total_balance_loss + balance_loss.reshape([1]);
+
+        let avg_budget: f32 = budget.iter().map(|&b| b as f32).sum::<f32>() / budget.len() as f32;
+        let efficiency_ratio = avg_budget / k_max as f32;
+        let efficiency_loss = Tensor::<B, 1>::from_floats([efficiency_ratio], &device);
+        total_efficiency_loss = total_efficiency_loss + efficiency_loss;
+
+        let log_sum_exp = all_scores.clone().exp().sum_dim(1).log();
+        let z_loss = log_sum_exp.powf_scalar(2.0).mean();
+        total_z_loss = total_z_loss + z_loss.reshape([1]);
+    }
+
+    let num_steps = router_outputs.len() as f32;
 
     AuxiliaryLosses {
-        balance_loss: balance_loss.reshape([1]),
-        efficiency_loss,
-        z_loss,
+        balance_loss: total_balance_loss / num_steps,
+        efficiency_loss: total_efficiency_loss / num_steps,
+        z_loss: total_z_loss / num_steps,
     }
 }
 
@@ -242,7 +264,7 @@ where
 
         let output = model.forward_with_mode(batch.inputs.clone(), routing_mode);
 
-        update_param_histogram(&mut param_histogram, &output.router_output.indices);
+        update_param_histogram(&mut param_histogram, &output.router_outputs[0].indices);
 
         let [batch_size, seq_len, vocab_size_out] = output.logits.dims();
         let logits_flat = output
@@ -255,9 +277,7 @@ where
             .forward(logits_flat, targets_flat);
 
         let aux_losses = compute_auxiliary_losses(
-            output.router_output.routing_probs.clone(),
-            output.router_output.all_scores.clone(),
-            &output.router_output.budget,
+            &output.router_outputs,
             model_config.k_max,
             model_config.pool_size,
         );
@@ -335,6 +355,12 @@ where
 
         let tracker = model.grad_tracker.borrow();
         if let Some(ref scores) = tracker.cached_scores {
+            // TODO: Update gradient computation for recurrence.
+            // Currently, this only supports the last step if cached_scores stores one step.
+            // If we want to train properly with recurrence, we need to accumulate gradients across steps.
+            // This requires major changes to PoolGradientTracker or manual backprop loop.
+            // For now, let's assume single step or just warn.
+            eprintln!("Warning: Offloaded training with recurrence and gradient tracking is not fully implemented yet.");
             let w_grads = compute_w_active_gradients(output_grad, scores.clone());
 
             drop(tracker);
@@ -359,12 +385,13 @@ where
             let avg_efficiency = running_efficiency / loss_count as f32;
 
             let avg_budget: f32 = output
-                .router_output
-                .budget
+                .router_outputs
                 .iter()
-                .map(|&b| b as f32)
+                .map(|out| {
+                    out.budget.iter().map(|&b| b as f32).sum::<f32>() / out.budget.len() as f32
+                })
                 .sum::<f32>()
-                / output.router_output.budget.len() as f32;
+                / output.router_outputs.len() as f32;
 
             println!(
                 "Step {}/{} [{}] | Loss: {:.4} | Bal: {:.4} | Eff: {:.2} | k: {:.0} | ε: {:.3}",

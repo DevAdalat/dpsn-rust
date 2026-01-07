@@ -14,6 +14,9 @@ pub struct DPSNConfig {
     #[config(default = 4)]
     pub num_heads: usize,
 
+    #[config(default = 1)]
+    pub recurrence_steps: usize,
+
     #[config(default = 64)]
     pub context_length: usize,
 

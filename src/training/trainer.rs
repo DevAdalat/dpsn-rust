@@ -14,8 +14,8 @@ use crate::data::batcher::DPSNBatcher;
 use crate::data::dataset::CharDataset;
 use crate::data::prefetcher::DataPrefetcher;
 use crate::model::config::{HierarchicalRouterConfig, StandardRouterConfig};
-use crate::model::dpsn::{DeviceLocation, HierarchicalDPSN, Precision, DPSN};
-use crate::model::router::RoutingMode;
+use crate::model::dpsn::{DeviceLocation, HierarchicalDPSN, DPSN};
+use crate::model::router::{RouterOutput, RoutingMode};
 
 #[derive(Config, Debug)]
 pub struct TrainingConfig {
@@ -36,6 +36,9 @@ pub struct TrainingConfig {
     pub save_interval: usize,
 
     pub checkpoint_dir: Option<PathBuf>,
+
+    #[config(default = 1)]
+    pub recurrence_steps: usize,
 }
 
 pub struct AuxiliaryLosses<B: Backend> {
@@ -45,29 +48,53 @@ pub struct AuxiliaryLosses<B: Backend> {
 }
 
 fn compute_auxiliary_losses<B: Backend>(
-    routing_probs: Tensor<B, 2>,
-    all_scores: Tensor<B, 2>,
-    budget: &[usize],
+    router_outputs: &[RouterOutput<B>],
     k_max: usize,
     pool_size: usize,
 ) -> AuxiliaryLosses<B> {
-    let device = routing_probs.device();
+    if router_outputs.is_empty() {
+        // Should not happen, but safe fallback
+        let device = B::Device::default();
+        return AuxiliaryLosses {
+            balance_loss: Tensor::zeros([1], &device),
+            efficiency_loss: Tensor::zeros([1], &device),
+            z_loss: Tensor::zeros([1], &device),
+        };
+    }
 
-    let mean_probs: Tensor<B, 1> = routing_probs.clone().mean_dim(0).squeeze();
-    let balance_loss = mean_probs.powf_scalar(2.0).sum() * (pool_size as f32);
+    let device = router_outputs[0].indices.device();
 
-    let avg_budget: f32 = budget.iter().map(|&b| b as f32).sum::<f32>() / budget.len() as f32;
-    let efficiency_ratio = avg_budget / k_max as f32;
-    let efficiency_loss = Tensor::<B, 1>::from_floats([efficiency_ratio], &device);
+    // Accumulate losses across all recurrence steps
+    let mut total_balance_loss = Tensor::<B, 1>::zeros([1], &device);
+    let mut total_efficiency_loss = Tensor::<B, 1>::zeros([1], &device);
+    let mut total_z_loss = Tensor::<B, 1>::zeros([1], &device);
 
-    let log_sum_exp = all_scores.clone().exp().sum_dim(1).log();
-    let z_loss = log_sum_exp.powf_scalar(2.0).mean();
-    let z_loss = z_loss.reshape([1]);
+    for output in router_outputs {
+        let routing_probs = &output.routing_probs;
+        let all_scores = &output.all_scores;
+        let budget = &output.budget;
+
+        let mean_probs: Tensor<B, 1> = routing_probs.clone().mean_dim(0).squeeze();
+        let balance_loss = mean_probs.powf_scalar(2.0).sum() * (pool_size as f32);
+        total_balance_loss = total_balance_loss + balance_loss.reshape([1]);
+
+        let avg_budget: f32 = budget.iter().map(|&b| b as f32).sum::<f32>() / budget.len() as f32;
+        let efficiency_ratio = avg_budget / k_max as f32;
+        let efficiency_loss = Tensor::<B, 1>::from_floats([efficiency_ratio], &device);
+        total_efficiency_loss = total_efficiency_loss + efficiency_loss;
+
+        let log_sum_exp = all_scores.clone().exp().sum_dim(1).log();
+        let z_loss = log_sum_exp.powf_scalar(2.0).mean();
+        total_z_loss = total_z_loss + z_loss.reshape([1]);
+    }
+
+    // Average over steps
+    let num_steps = router_outputs.len() as f32;
 
     AuxiliaryLosses {
-        balance_loss: balance_loss.reshape([1]),
-        efficiency_loss,
-        z_loss,
+        balance_loss: total_balance_loss / num_steps,
+        efficiency_loss: total_efficiency_loss / num_steps,
+        z_loss: total_z_loss / num_steps,
     }
 }
 
@@ -241,7 +268,7 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
 
     dataset: &CharDataset,
     device: &B::Device,
-    device_location: DeviceLocation,
+    _device_location: DeviceLocation,
 ) -> DPSN<B::InnerBackend> {
     let mut model: DPSN<B> = DPSN::new(
         vocab_size,
@@ -249,6 +276,7 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
         pool_size,
         num_heads,
         context_length,
+        config.recurrence_steps,
         router_config.clone(),
         device,
     );
@@ -258,7 +286,7 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
     let prefetcher = DataPrefetcher::new(dataset.clone(), config.batch_size, true, 4);
 
     let stats = model.param_stats();
-    stats.print_summary("DPSN", device_location, Precision::F32);
+    stats.print_summary("DPSN");
 
     print_curriculum_config(&curriculum);
 
@@ -334,13 +362,8 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
             .init(&logits_flat.device())
             .forward(logits_flat, targets_flat);
 
-        let aux_losses = compute_auxiliary_losses(
-            output.router_output.routing_probs.clone(),
-            output.router_output.all_scores.clone(),
-            &output.router_output.budget,
-            router_config.k_max,
-            pool_size,
-        );
+        let aux_losses =
+            compute_auxiliary_losses(&output.router_outputs, router_config.k_max, pool_size);
 
         let balance_weight = schedule.balance_weight as f32;
         let efficiency_weight = schedule.efficiency_weight as f32;
@@ -363,7 +386,9 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
 
         if (step + 1) % config.log_interval == 0 {
             // Move histogram update here to avoid per-step sync
-            update_param_histogram(&mut param_histogram, &output.router_output.indices);
+            for router_out in &output.router_outputs {
+                update_param_histogram(&mut param_histogram, &router_out.indices);
+            }
 
             // Sync scalars now
             let loss_scalar: f32 = running_loss
@@ -417,12 +442,13 @@ pub fn train_with_curriculum<B: AutodiffBackend>(
             }
 
             let avg_budget: f32 = output
-                .router_output
-                .budget
+                .router_outputs
                 .iter()
-                .map(|&b| b as f32)
+                .map(|out| {
+                    out.budget.iter().map(|&b| b as f32).sum::<f32>() / out.budget.len() as f32
+                })
                 .sum::<f32>()
-                / output.router_output.budget.len() as f32;
+                / output.router_outputs.len() as f32;
 
             println!(
                 "Step {}/{} [{}] | Loss: {:.4} | Balance: {:.4} | Eff: {:.2} | Budget: {:.0} | ε: {:.3}",
@@ -477,7 +503,7 @@ pub fn train_hierarchical<B: AutodiffBackend>(
     context_length: usize,
     dataset: &CharDataset,
     device: &B::Device,
-    device_location: DeviceLocation,
+    _device_location: DeviceLocation,
 ) -> HierarchicalDPSN<B::InnerBackend> {
     let mut model: HierarchicalDPSN<B> = HierarchicalDPSN::new(
         vocab_size,
@@ -485,6 +511,7 @@ pub fn train_hierarchical<B: AutodiffBackend>(
         pool_size,
         num_heads,
         context_length,
+        config.recurrence_steps,
         router_config.clone(),
         device,
     );
@@ -493,7 +520,7 @@ pub fn train_hierarchical<B: AutodiffBackend>(
     let prefetcher = DataPrefetcher::new(dataset.clone(), config.batch_size, true, 4);
 
     let stats = model.param_stats();
-    stats.print_summary("Hierarchical DPSN", device_location, Precision::F32);
+    stats.print_summary("Hierarchical DPSN");
 
     print_curriculum_config(&curriculum);
 
@@ -572,13 +599,8 @@ pub fn train_hierarchical<B: AutodiffBackend>(
             .init(&logits_flat.device())
             .forward(logits_flat, targets_flat);
 
-        let aux_losses = compute_auxiliary_losses(
-            output.router_output.routing_probs.clone(),
-            output.router_output.all_scores.clone(),
-            &output.router_output.budget,
-            router_config.k_max,
-            pool_size,
-        );
+        let aux_losses =
+            compute_auxiliary_losses(&output.router_outputs, router_config.k_max, pool_size);
 
         let balance_weight = schedule.balance_weight as f32;
         let efficiency_weight = schedule.efficiency_weight as f32;
@@ -601,7 +623,9 @@ pub fn train_hierarchical<B: AutodiffBackend>(
 
         if (step + 1) % config.log_interval == 0 {
             // Move histogram update here to avoid per-step sync
-            update_param_histogram(&mut param_histogram, &output.router_output.indices);
+            for router_out in &output.router_outputs {
+                update_param_histogram(&mut param_histogram, &router_out.indices);
+            }
 
             // Sync scalars now
             let loss_scalar: f32 = running_loss
@@ -654,12 +678,13 @@ pub fn train_hierarchical<B: AutodiffBackend>(
             }
 
             let avg_budget: f32 = output
-                .router_output
-                .budget
+                .router_outputs
                 .iter()
-                .map(|&b| b as f32)
+                .map(|out| {
+                    out.budget.iter().map(|&b| b as f32).sum::<f32>() / out.budget.len() as f32
+                })
                 .sum::<f32>()
-                / output.router_output.budget.len() as f32;
+                / output.router_outputs.len() as f32;
 
             println!(
                 "Step {}/{} [{}] | Loss: {:.4} | Balance: {:.4} | Eff: {:.2} | Budget: {:.0} | ε: {:.3}",

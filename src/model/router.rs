@@ -48,6 +48,7 @@ impl RouterConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct RouterOutput<B: Backend> {
     pub complexity: Tensor<B, 2>,
     pub budget: Vec<usize>,

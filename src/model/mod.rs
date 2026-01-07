@@ -6,6 +6,7 @@ pub mod offloaded_dpsn;
 pub mod offloaded_pool;
 pub mod parameter_pool;
 pub mod router;
+pub mod step_embedding;
 
 pub use dpsn::{DeviceLocation, HierarchicalDPSN, ParameterStats, Precision, DPSN};
 pub use hierarchical_router::{

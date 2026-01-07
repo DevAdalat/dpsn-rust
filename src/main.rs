@@ -6,17 +6,13 @@ use burn::backend::Autodiff;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-use dpsn::config::{
-    DevicePlacement, DeviceType, FullConfig, HierarchicalRouterSettings, RouterSettings,
-    StandardRouterSettings,
-};
+use dpsn::config::{DevicePlacement, DeviceType, FullConfig, RouterSettings};
 use dpsn::data::{download_tiny_shakespeare, load_dataset_from_config, CharDataset};
 use dpsn::inference::TextGenerator;
 use dpsn::model::config::{HierarchicalRouterConfig, StandardRouterConfig};
 use dpsn::model::{DeviceLocation, DPSN};
 use dpsn::training::{
-    find_latest_checkpoint, load_checkpoint, train_hierarchical, train_with_curriculum,
-    CurriculumConfig, TrainingConfig,
+    load_checkpoint, train_hierarchical, train_with_curriculum, CurriculumConfig, TrainingConfig,
 };
 
 type NdArrayBackend = NdArray<f32>;
@@ -194,7 +190,7 @@ fn print_gpu_memory_info() {
     println!("║  GPU Memory:   (Unable to query - nvidia-smi not available)               ║");
 }
 
-fn print_cuda_memory_info(device_index: i32) {
+fn print_cuda_memory_info(_device_index: i32) {
     #[cfg(target_os = "linux")]
     {
         if let Ok(output) = std::process::Command::new("nvidia-smi")
@@ -654,6 +650,7 @@ fn run_generate_with_config<B: burn::tensor::backend::AutodiffBackend>(
                     config.model.pool_size,
                     config.model.num_heads,
                     config.model.context_length,
+                    config.model.recurrence_steps,
                     router_config,
                     &device,
                 )
@@ -827,7 +824,7 @@ fn run_training_from_config<B: burn::tensor::backend::AutodiffBackend>(
             exploration_noise: s_config.exploration_noise,
         };
 
-        let model = train_with_curriculum::<B>(
+        let _model = train_with_curriculum::<B>(
             training_config,
             curriculum_config,
             dataset.vocab_size(),
@@ -942,6 +939,7 @@ fn run_generation<B: burn::tensor::backend::AutodiffBackend>(
             5000,
             4,
             64,
+            1,
             router_config,
             &device,
         );

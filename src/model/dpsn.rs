@@ -1,3 +1,9 @@
+use super::config::{HierarchicalRouterConfig as HRouterConfig, StandardRouterConfig};
+use super::execution_engine::{ExecutionEngine, ExecutionEngineConfig};
+use super::hierarchical_router::{HierarchicalRouter, HierarchicalRouterConfig};
+use super::parameter_pool::{ParameterPool, ParameterPoolConfig};
+use super::router::{Router, RouterConfig, RouterOutput, RoutingMode};
+use super::step_embedding::{StepEmbedding, StepEmbeddingConfig};
 use burn::module::Module;
 use burn::nn::attention::{
     generate_autoregressive_mask, MhaInput, MultiHeadAttention, MultiHeadAttentionConfig,
@@ -6,15 +12,10 @@ use burn::nn::{Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, L
 use burn::prelude::*;
 use burn::tensor::backend::Backend;
 
-use super::config::{HierarchicalRouterConfig as HRouterConfig, StandardRouterConfig};
-use super::execution_engine::{ExecutionEngine, ExecutionEngineConfig};
-use super::hierarchical_router::{HierarchicalRouter, HierarchicalRouterConfig};
-use super::parameter_pool::{ParameterPool, ParameterPoolConfig};
-use super::router::{Router, RouterConfig, RouterOutput, RoutingMode};
-
 #[derive(Module, Debug)]
 pub struct DPSN<B: Backend> {
     embedding: Embedding<B>,
+    step_embedding: StepEmbedding<B>,
     norm1: LayerNorm<B>,
     attention: MultiHeadAttention<B>,
     norm2: LayerNorm<B>,
@@ -38,11 +39,14 @@ pub struct DPSN<B: Backend> {
     pub num_heads: usize,
     #[module(skip)]
     pub context_length: usize,
+    #[module(skip)]
+    pub recurrence_steps: usize,
 }
 
+#[derive(Clone)]
 pub struct DPSNOutput<B: Backend> {
     pub logits: Tensor<B, 3>,
-    pub router_output: RouterOutput<B>,
+    pub router_outputs: Vec<RouterOutput<B>>,
 }
 
 impl<B: Backend> DPSN<B> {
@@ -52,10 +56,18 @@ impl<B: Backend> DPSN<B> {
         pool_size: usize,
         num_heads: usize,
         context_length: usize,
+        recurrence_steps: usize,
         router_config: StandardRouterConfig,
         device: &B::Device,
     ) -> Self {
         let embedding = EmbeddingConfig::new(vocab_size, embed_dim).init(device);
+        let step_embedding = StepEmbedding::new(
+            &StepEmbeddingConfig {
+                max_steps: recurrence_steps,
+                embed_dim,
+            },
+            device,
+        );
 
         let norm1 = LayerNormConfig::new(embed_dim).init(device);
         let attention = MultiHeadAttentionConfig::new(embed_dim, num_heads)
@@ -89,6 +101,7 @@ impl<B: Backend> DPSN<B> {
 
         DPSN {
             embedding,
+            step_embedding,
             norm1,
             attention,
             norm2,
@@ -104,6 +117,7 @@ impl<B: Backend> DPSN<B> {
             router_hidden_dim: router_config.hidden_dim,
             num_heads,
             context_length,
+            recurrence_steps,
         }
     }
 
@@ -122,35 +136,48 @@ impl<B: Backend> DPSN<B> {
         let [batch_size, seq_len] = tokens.dims();
 
         let embeddings = self.embedding.forward(tokens);
+        let mut x = embeddings.clone();
+        let mut router_outputs = Vec::new();
 
-        let x = self.norm1.forward(embeddings.clone());
-        let mask = generate_autoregressive_mask(batch_size, seq_len, &x.device());
-        let attn_input = MhaInput::self_attn(x).mask_attn(mask);
-        let attn_output = self.attention.forward(attn_input);
-        let x = embeddings + attn_output.context;
+        for t in 0..self.recurrence_steps {
+            let step_emb = self.step_embedding.forward(t);
+            let step_emb = step_emb.unsqueeze_dim::<3>(0);
+            let current_state = x.clone() + step_emb;
 
-        let flat_embeddings = self
-            .norm2
-            .forward(x)
-            .reshape([batch_size * seq_len, self.embed_dim]);
+            let x_norm1 = self.norm1.forward(current_state);
+            let mask = generate_autoregressive_mask(batch_size, seq_len, &x_norm1.device());
+            let attn_input = MhaInput::self_attn(x_norm1).mask_attn(mask);
+            let attn_output = self.attention.forward(attn_input);
+            x = x + attn_output.context; // Residual 1
 
-        let router_output = self.router.forward_with_mode(flat_embeddings.clone(), mode);
+            // 3. Router & Execution
+            let flat_embeddings = self
+                .norm2
+                .forward(x.clone())
+                .reshape([batch_size * seq_len, self.embed_dim]);
 
-        let w_active = self.pool.retrieve(router_output.indices.clone());
+            let router_output = self
+                .router
+                .forward_with_mode(flat_embeddings.clone(), mode.clone());
+            let indices = router_output.indices.clone();
+            let scores = router_output.selected_scores.clone();
 
-        let output = self.engine.forward(
-            flat_embeddings,
-            w_active,
-            router_output.selected_scores.clone(),
-        );
+            router_outputs.push(router_output);
 
-        let output_reshaped = output.reshape([batch_size, seq_len, self.embed_dim]);
+            let w_active = self.pool.retrieve(indices);
 
-        let logits = self.output_head.forward(output_reshaped);
+            let output = self.engine.forward(flat_embeddings, w_active, scores);
+
+            let output_reshaped = output.reshape([batch_size, seq_len, self.embed_dim]);
+
+            x = x + output_reshaped; // Residual 2
+        }
+
+        let logits = self.output_head.forward(x);
 
         DPSNOutput {
             logits,
-            router_output,
+            router_outputs,
         }
     }
 
@@ -187,6 +214,7 @@ impl<B: Backend> DPSN<B> {
 #[derive(Module, Debug)]
 pub struct HierarchicalDPSN<B: Backend> {
     embedding: Embedding<B>,
+    step_embedding: StepEmbedding<B>,
     norm1: LayerNorm<B>,
     attention: MultiHeadAttention<B>,
     norm2: LayerNorm<B>,
@@ -210,6 +238,8 @@ pub struct HierarchicalDPSN<B: Backend> {
     pub num_heads: usize,
     #[module(skip)]
     pub context_length: usize,
+    #[module(skip)]
+    pub recurrence_steps: usize,
 }
 
 impl<B: Backend> HierarchicalDPSN<B> {
@@ -219,10 +249,18 @@ impl<B: Backend> HierarchicalDPSN<B> {
         pool_size: usize,
         num_heads: usize,
         context_length: usize,
+        recurrence_steps: usize,
         router_config: HRouterConfig,
         device: &B::Device,
     ) -> Self {
         let embedding = EmbeddingConfig::new(vocab_size, embed_dim).init(device);
+        let step_embedding = StepEmbedding::new(
+            &StepEmbeddingConfig {
+                max_steps: recurrence_steps,
+                embed_dim,
+            },
+            device,
+        );
 
         let norm1 = LayerNormConfig::new(embed_dim).init(device);
         let attention = MultiHeadAttentionConfig::new(embed_dim, num_heads)
@@ -257,6 +295,7 @@ impl<B: Backend> HierarchicalDPSN<B> {
 
         HierarchicalDPSN {
             embedding,
+            step_embedding,
             norm1,
             attention,
             norm2,
@@ -272,6 +311,7 @@ impl<B: Backend> HierarchicalDPSN<B> {
             num_clusters: router_config.num_clusters,
             num_heads,
             context_length,
+            recurrence_steps,
         }
     }
 
@@ -290,37 +330,49 @@ impl<B: Backend> HierarchicalDPSN<B> {
         let [batch_size, seq_len] = tokens.dims();
 
         let embeddings = self.embedding.forward(tokens);
+        let mut x = embeddings.clone();
+        let mut router_outputs = Vec::new();
 
-        let x = self.norm1.forward(embeddings.clone());
-        let mask = generate_autoregressive_mask(batch_size, seq_len, &x.device());
-        let attn_input = MhaInput::self_attn(x).mask_attn(mask);
-        let attn_output = self.attention.forward(attn_input);
-        let x = embeddings + attn_output.context;
+        for t in 0..self.recurrence_steps {
+            let step_emb = self.step_embedding.forward(t);
+            let step_emb = step_emb.unsqueeze_dim::<3>(0);
+            let current_state = x.clone() + step_emb;
 
-        let flat_embeddings = self
-            .norm2
-            .forward(x)
-            .reshape([batch_size * seq_len, self.embed_dim]);
+            let x_norm1 = self.norm1.forward(current_state);
+            let mask = generate_autoregressive_mask(batch_size, seq_len, &x_norm1.device());
+            let attn_input = MhaInput::self_attn(x_norm1).mask_attn(mask);
+            let attn_output = self.attention.forward(attn_input);
+            x = x + attn_output.context; // Residual 1
 
-        let hierarchical_output = self.router.forward_with_mode(flat_embeddings.clone(), mode);
+            // 3. Router & Execution
+            let flat_embeddings = self
+                .norm2
+                .forward(x.clone())
+                .reshape([batch_size * seq_len, self.embed_dim]);
 
-        let router_output: RouterOutput<B> = hierarchical_output.into();
+            let hierarchical_output = self
+                .router
+                .forward_with_mode(flat_embeddings.clone(), mode.clone());
+            let router_output: RouterOutput<B> = hierarchical_output.into();
+            let indices = router_output.indices.clone();
+            let scores = router_output.selected_scores.clone();
 
-        let w_active = self.pool.retrieve(router_output.indices.clone());
+            router_outputs.push(router_output);
 
-        let output = self.engine.forward(
-            flat_embeddings,
-            w_active,
-            router_output.selected_scores.clone(),
-        );
+            let w_active = self.pool.retrieve(indices);
 
-        let output_reshaped = output.reshape([batch_size, seq_len, self.embed_dim]);
+            let output = self.engine.forward(flat_embeddings, w_active, scores);
 
-        let logits = self.output_head.forward(output_reshaped);
+            let output_reshaped = output.reshape([batch_size, seq_len, self.embed_dim]);
+
+            x = x + output_reshaped; // Residual 2
+        }
+
+        let logits = self.output_head.forward(x);
 
         DPSNOutput {
             logits,
-            router_output,
+            router_outputs,
         }
     }
 
@@ -330,9 +382,7 @@ impl<B: Backend> HierarchicalDPSN<B> {
 
     pub fn param_stats(&self) -> ParameterStats {
         let pool_params = self.pool_size * self.embed_dim;
-        let cluster_size = (self.pool_size + self.num_clusters - 1) / self.num_clusters;
-        let router_params =
-            self.embed_dim * self.num_clusters + self.embed_dim * cluster_size + self.embed_dim;
+        let router_params = self.router.param_count();
         let embed_params = self.vocab_size * self.embed_dim;
         let output_params = self.embed_dim * self.vocab_size;
         let engine_params = self.embed_dim * self.embed_dim;
@@ -366,12 +416,7 @@ pub struct ParameterStats {
 }
 
 impl ParameterStats {
-    pub fn print_summary(
-        &self,
-        model_name: &str,
-        device_location: DeviceLocation,
-        precision: Precision,
-    ) {
+    pub fn print_summary(&self, model_name: &str) {
         let scale = 1_000_000.0;
         let unit = "M";
 

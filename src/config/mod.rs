@@ -31,6 +31,8 @@ pub struct ModelConfig {
     pub num_heads: usize,
     #[serde(default = "default_context_length")]
     pub context_length: usize,
+    #[serde(default = "default_recurrence_steps")]
+    pub recurrence_steps: usize,
     #[serde(default)]
     pub router: RouterSettings,
 }
@@ -240,6 +242,9 @@ fn default_router_hidden_dim() -> usize {
 fn default_context_length() -> usize {
     64
 }
+fn default_recurrence_steps() -> usize {
+    1
+}
 fn default_exploration_noise() -> f64 {
     0.1
 }
@@ -334,6 +339,7 @@ impl FullConfig {
                 pool_size: 20000,
                 num_heads: 4,
                 context_length: 64,
+                recurrence_steps: 1,
                 router: RouterSettings::Standard(StandardRouterSettings::default()),
             },
             training: TrainingSettings {
@@ -372,6 +378,7 @@ impl FullConfig {
                 pool_size: 2000,
                 num_heads: 4,
                 context_length: 32,
+                recurrence_steps: 1,
                 router: RouterSettings::Standard(StandardRouterSettings {
                     k_min: 20,
                     k_max: 200,
@@ -419,6 +426,7 @@ impl FullConfig {
                 pool_size: 10000,
                 num_heads: 8,
                 context_length: 128,
+                recurrence_steps: 4,
                 router: RouterSettings::Hierarchical(HierarchicalRouterSettings {
                     k_min: 50,
                     k_max: 1000,
