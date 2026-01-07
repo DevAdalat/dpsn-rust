@@ -6,7 +6,7 @@ authors = ["Dev Kumar <devkumar011a@gmail.com>"]
 description = "Dynamic Parameter Selection Networks - Ultra-Fine-Grained Sparse Activation"
 
 [dependencies]
-burn = { version = "0.19.1", features = ["train", "tui", "wgpu", "ndarray", "candle", "burn-cuda", "cubecl", "cuda"] }
+burn = { version = "0.19.1", features = ["train", "tui", "wgpu", "ndarray", "candle", "burn-cuda", "cubecl", "cuda", "fusion"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"

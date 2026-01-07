@@ -1,5 +1,7 @@
 use burn::module::Module;
-use burn::nn::attention::{MhaInput, MultiHeadAttention, MultiHeadAttentionConfig};
+use burn::nn::attention::{
+    generate_autoregressive_mask, MhaInput, MultiHeadAttention, MultiHeadAttentionConfig,
+};
 use burn::nn::{Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig};
 use burn::prelude::*;
 use burn::tensor::backend::Backend;
@@ -120,7 +122,8 @@ impl<B: Backend> DPSN<B> {
         let embeddings = self.embedding.forward(tokens);
 
         let x = self.norm1.forward(embeddings.clone());
-        let attn_input = MhaInput::self_attn(x);
+        let mask = generate_autoregressive_mask(batch_size, seq_len, &x.device());
+        let attn_input = MhaInput::self_attn(x).mask_attn(mask);
         let attn_output = self.attention.forward(attn_input);
         let x = embeddings + attn_output.context;
 
@@ -287,7 +290,8 @@ impl<B: Backend> HierarchicalDPSN<B> {
         let embeddings = self.embedding.forward(tokens);
 
         let x = self.norm1.forward(embeddings.clone());
-        let attn_input = MhaInput::self_attn(x);
+        let mask = generate_autoregressive_mask(batch_size, seq_len, &x.device());
+        let attn_input = MhaInput::self_attn(x).mask_attn(mask);
         let attn_output = self.attention.forward(attn_input);
         let x = embeddings + attn_output.context;
 

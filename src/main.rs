@@ -268,6 +268,9 @@ enum Commands {
         #[arg(long, default_value = "4")]
         num_heads: usize,
 
+        #[arg(long, default_value = "128")]
+        router_hidden_dim: usize,
+
         #[arg(long, default_value = "64")]
         context_length: usize,
 
@@ -374,6 +377,7 @@ fn main() {
             k_min,
             k_max,
             num_heads,
+            router_hidden_dim,
             context_length,
             data_dir,
         }) => {
@@ -392,6 +396,7 @@ fn main() {
                         embed_dim,
                         k_min,
                         k_max,
+                        router_hidden_dim,
                         num_heads,
                         context_length,
                         &data_dir,
@@ -406,6 +411,7 @@ fn main() {
                         embed_dim,
                         k_min,
                         k_max,
+                        router_hidden_dim,
                         num_heads,
                         context_length,
                         &data_dir,
@@ -420,6 +426,7 @@ fn main() {
                         embed_dim,
                         k_min,
                         k_max,
+                        router_hidden_dim,
                         num_heads,
                         context_length,
                         &data_dir,
@@ -434,6 +441,7 @@ fn main() {
                         embed_dim,
                         k_min,
                         k_max,
+                        router_hidden_dim,
                         num_heads,
                         context_length,
                         &data_dir,
@@ -809,6 +817,7 @@ fn run_training<B: burn::tensor::backend::AutodiffBackend>(
     embed_dim: usize,
     k_min: usize,
     k_max: usize,
+    router_hidden_dim: usize,
     num_heads: usize,
     context_length: usize,
     data_dir: &str,
@@ -850,7 +859,7 @@ fn run_training<B: burn::tensor::backend::AutodiffBackend>(
         pool_size,
         k_min,
         k_max,
-        128,
+        router_hidden_dim,
         num_heads,
         context_length,
         0.1,
