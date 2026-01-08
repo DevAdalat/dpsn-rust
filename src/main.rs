@@ -6,7 +6,7 @@ use burn::backend::Autodiff;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-use dpsn::config::{DevicePlacement, DeviceType, FullConfig, RouterSettings};
+use dpsn::config::{FullConfig, RouterSettings};
 use dpsn::data::{download_tiny_shakespeare, load_dataset_from_config, CharDataset};
 use dpsn::inference::TextGenerator;
 use dpsn::model::config::{HierarchicalRouterConfig, StandardRouterConfig};
@@ -190,7 +190,7 @@ fn print_gpu_memory_info() {
     println!("║  GPU Memory:   (Unable to query - nvidia-smi not available)               ║");
 }
 
-fn print_cuda_memory_info(_device_index: i32) {
+fn print_cuda_memory_info(device_index: i32) {
     #[cfg(target_os = "linux")]
     {
         if let Ok(output) = std::process::Command::new("nvidia-smi")
