@@ -1,0 +1,48 @@
+model:
+  vocab_size: 50257
+  embed_dim: 512
+  pool_size: 698586
+  num_heads: 8
+  context_length: 1024
+  recurrence_steps: 1
+  router:
+    type: standard
+    k_min: 3492
+    k_max: 34929
+    hidden_dim: 128
+    exploration_noise: 0.1
+
+training:
+  num_steps: 10000
+  batch_size: 8
+  learning_rate: 0.0003
+  log_interval: 50
+  save_interval: 1000
+  checkpoint_dir: checkpoints_auto
+
+dataset:
+  source: local_file
+  data_dir: data
+  local_file: "data/tiny_shakespeare.txt"
+
+inference:
+  max_tokens: 500
+  temperature: 0.8
+  default_prompt: "The "
+
+backend:
+  backend_type: wgpu
+
+curriculum:
+  warmup_steps: 1000
+  specialization_steps: 5000
+  balance_weight: 0.1
+  efficiency_weight: 0.05
+  z_loss_weight: 0.001
+
+device_placement:
+  pool: "Cpu"
+  router: "Gpu"
+  embedding: "Gpu"
+  engine: "Gpu"
+  head: "Gpu"
