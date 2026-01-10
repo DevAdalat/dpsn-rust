@@ -1,0 +1,40 @@
+model:
+  embed_dim: 32
+  pool_size: 2000
+  num_heads: 4
+  context_length: 32
+  recurrence_steps: 1
+  router:
+    type: standard
+    k_min: 20
+    k_max: 200
+    hidden_dim: 64
+    exploration_noise: 0.1
+
+training:
+  num_epochs: 1
+  batch_size: 3
+  learning_rate: 0.001
+  log_interval: 1
+  save_interval: 10
+  checkpoint_dir: checkpoints_parquet
+
+dataset:
+  source: localparquet
+  parquet:
+    file: "data/output.parquet"
+    column: "Joke"
+  tokenizer_path: "data/tokenizer.json"
+
+
+inference:
+  max_tokens: 20
+  temperature: 0.8
+  default_prompt: "Hello"
+
+backend:
+  backend_type: wgpu
+
+curriculum:
+  warmup_steps: 2
+  specialization_steps: 3

@@ -3,17 +3,17 @@ use burn::tensor::activation;
 use burn::tensor::backend::Backend;
 use rand::Rng;
 
-use crate::data::tokenizer::CharTokenizer;
+use crate::data::tokenizer::{Tokenizer, TokenizerType};
 use crate::model::dpsn::{HierarchicalDPSN, DPSN};
 
 pub struct TextGenerator<'a, B: Backend> {
     model: &'a DPSN<B>,
-    tokenizer: &'a CharTokenizer,
+    tokenizer: &'a TokenizerType,
     device: B::Device,
 }
 
 impl<'a, B: Backend> TextGenerator<'a, B> {
-    pub fn new(model: &'a DPSN<B>, tokenizer: &'a CharTokenizer, device: B::Device) -> Self {
+    pub fn new(model: &'a DPSN<B>, tokenizer: &'a TokenizerType, device: B::Device) -> Self {
         TextGenerator {
             model,
             tokenizer,
@@ -43,9 +43,9 @@ impl<'a, B: Backend> TextGenerator<'a, B> {
                 .slice([
                     0..1,
                     (context.len() - 1)..context.len(),
-                    0..self.tokenizer.vocab_size,
+                    0..self.tokenizer.vocab_size(),
                 ])
-                .reshape([self.tokenizer.vocab_size]);
+                .reshape([self.tokenizer.vocab_size()]);
 
             let scaled_logits = last_logits / temperature;
             let probs = activation::softmax(scaled_logits, 0);
@@ -96,9 +96,9 @@ impl<'a, B: Backend> TextGenerator<'a, B> {
                 .slice([
                     0..1,
                     (context.len() - 1)..context.len(),
-                    0..self.tokenizer.vocab_size,
+                    0..self.tokenizer.vocab_size(),
                 ])
-                .reshape([self.tokenizer.vocab_size]);
+                .reshape([self.tokenizer.vocab_size()]);
 
             let argmax_data: Vec<i64> = last_logits.argmax(0).into_data().to_vec().unwrap();
             let next_token = argmax_data.first().copied().unwrap_or(0) as usize;
@@ -111,14 +111,14 @@ impl<'a, B: Backend> TextGenerator<'a, B> {
 
 pub struct HierarchicalTextGenerator<'a, B: Backend> {
     model: &'a HierarchicalDPSN<B>,
-    tokenizer: &'a CharTokenizer,
+    tokenizer: &'a TokenizerType,
     device: B::Device,
 }
 
 impl<'a, B: Backend> HierarchicalTextGenerator<'a, B> {
     pub fn new(
         model: &'a HierarchicalDPSN<B>,
-        tokenizer: &'a CharTokenizer,
+        tokenizer: &'a TokenizerType,
         device: B::Device,
     ) -> Self {
         HierarchicalTextGenerator {
@@ -150,9 +150,9 @@ impl<'a, B: Backend> HierarchicalTextGenerator<'a, B> {
                 .slice([
                     0..1,
                     (context.len() - 1)..context.len(),
-                    0..self.tokenizer.vocab_size,
+                    0..self.tokenizer.vocab_size(),
                 ])
-                .reshape([self.tokenizer.vocab_size]);
+                .reshape([self.tokenizer.vocab_size()]);
 
             let scaled_logits = last_logits / temperature;
             let probs = activation::softmax(scaled_logits, 0);

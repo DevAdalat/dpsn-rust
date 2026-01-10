@@ -22,7 +22,8 @@ training:
 dataset:
   source: tinyshakespeare
   data_dir: data
-
+  # max_items: 5000  # Optional: Limit number of items to load from dataset
+  # tokenizer_path: "path/to/tokenizer.json"  # Optional: Use HuggingFace tokenizer instead of char-level
 inference:
   max_tokens: 200
   temperature: 0.8

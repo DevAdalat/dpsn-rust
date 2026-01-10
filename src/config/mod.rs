@@ -143,6 +143,12 @@ pub struct DatasetConfig {
     pub huggingface: Option<HuggingFaceConfig>,
     #[serde(default)]
     pub local_file: Option<String>,
+    #[serde(default)]
+    pub parquet: Option<ParquetConfig>,
+    #[serde(default)]
+    pub tokenizer_path: Option<String>,
+    #[serde(default)]
+    pub max_items: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -152,6 +158,14 @@ pub enum DatasetSource {
     TinyShakespeare,
     HuggingFace,
     LocalFile,
+    LocalParquet,
+    BurnDataset,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParquetConfig {
+    pub file: String,
+    pub column: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +179,10 @@ pub struct HuggingFaceConfig {
     pub text_column: Option<String>,
     #[serde(default)]
     pub revision: Option<String>,
+    #[serde(default)]
+    pub subset: Option<String>,
+    #[serde(default)]
+    pub trust_remote_code: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -356,6 +374,9 @@ impl FullConfig {
                 data_dir: "data".to_string(),
                 huggingface: None,
                 local_file: None,
+                parquet: None,
+                tokenizer_path: None,
+                max_items: None,
             },
             inference: InferenceConfig {
                 max_tokens: 200,
@@ -400,6 +421,9 @@ impl FullConfig {
                 data_dir: "data".to_string(),
                 huggingface: None,
                 local_file: None,
+                parquet: None,
+                tokenizer_path: None,
+                max_items: None,
             },
             inference: InferenceConfig {
                 max_tokens: 50,
@@ -453,8 +477,13 @@ impl FullConfig {
                     split: None,
                     text_column: None,
                     revision: None,
+                    subset: None,
+                    trust_remote_code: None,
                 }),
                 local_file: None,
+                parquet: None,
+                tokenizer_path: None,
+                max_items: None,
             },
             inference: InferenceConfig {
                 max_tokens: 200,

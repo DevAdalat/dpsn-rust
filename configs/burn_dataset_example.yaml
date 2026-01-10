@@ -1,0 +1,33 @@
+model:
+  type: dpsn
+  vocab_size: 50000
+  d_model: 512
+  n_layers: 6
+  n_heads: 8
+  context_length: 256
+  dropout: 0.1
+
+training:
+  batch_size: 32
+  learning_rate: 0.0003
+  num_epochs: 10
+  eval_interval: 500
+  checkpoint_interval: 1000
+  gradient_clip: 1.0
+  checkpoint_dir: checkpoints
+
+dataset:
+  source: burndataset
+  max_items: 10000
+  huggingface:
+    repo_id: "HuggingFaceFW/fineweb"
+    subset: "sample-10BT"
+    split: "train"
+    text_column: "text"
+    trust_remote_code: true
+  tokenizer_path: "path/to/tokenizer.json"
+
+inference:
+  max_tokens: 200
+  temperature: 0.8
+  prompt: "Once upon a time"

@@ -623,15 +623,13 @@ fn run_generate_with_config<B: burn::tensor::backend::AutodiffBackend>(
 ) {
     println!("=== DPSN Text Generation (from config) ===\n");
 
-    let text = match load_dataset_from_config(&config.dataset) {
-        Ok(t) => t,
+    let dataset = match CharDataset::from_config(&config.dataset, config.model.context_length) {
+        Ok(d) => d,
         Err(e) => {
             eprintln!("Failed to load dataset: {}", e);
             return;
         }
     };
-
-    let dataset = CharDataset::new(&text, config.model.context_length);
     let device: <B::InnerBackend as burn::tensor::backend::Backend>::Device = Default::default();
 
     let model: DPSN<B::InnerBackend> = if let Some(ckpt_path) = checkpoint {
@@ -733,15 +731,13 @@ fn run_training_from_config<B: burn::tensor::backend::AutodiffBackend>(
 ) {
     println!("=== DPSN Training (from config) ===\n");
 
-    let text = match load_dataset_from_config(&config.dataset) {
-        Ok(t) => t,
+    let dataset = match CharDataset::from_config(&config.dataset, config.model.context_length) {
+        Ok(d) => d,
         Err(e) => {
             eprintln!("Failed to load dataset: {}", e);
             return;
         }
     };
-
-    let dataset = CharDataset::new(&text, config.model.context_length);
 
     println!("Dataset loaded:");
     println!("  - Total tokens: {}", dataset.tokens.len());
