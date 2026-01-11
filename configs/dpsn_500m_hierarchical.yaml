@@ -1,15 +1,15 @@
 model:
-  vocab_size: 200054
-  embed_dim: 512
-  pool_size: 1538309
-  num_heads: 8
+  vocab_size: 50257
+  embed_dim: 1600
+  pool_size: 200783
+  num_heads: 25
   context_length: 1024
   recurrence_steps: 1
   router:
     type: hierarchical
-    k_min: 7691
-    k_max: 76915
-    num_clusters: 128
+    k_min: 1003
+    k_max: 10039
+    num_clusters: 64
     top_clusters: 4
     exploration_noise: 0.1
 
@@ -22,9 +22,11 @@ training:
   checkpoint_dir: checkpoints_auto
 
 dataset:
-  source: local_file
-  data_dir: data
-  local_file: "data/tiny_shakespeare.txt"
+  source: localparquet
+  parquet:
+    file: "data/output.parquet"
+    column: "Joke"
+  tokenizer_path: "data/tokenizer.json"
 
 inference:
   max_tokens: 500

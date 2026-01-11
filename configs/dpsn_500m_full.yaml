@@ -1,20 +1,20 @@
 model:
-  vocab_size: 200054
+  vocab_size: 50257
   embed_dim: 512
-  pool_size: 1538309
+  pool_size: 698586
   num_heads: 8
   context_length: 1024
   recurrence_steps: 1
   router:
-    type: hierarchical
-    k_min: 7691
-    k_max: 76915
-    num_clusters: 128
-    top_clusters: 4
+    type: standard
+    k_min: 3492
+    k_max: 34929
+    hidden_dim: 128
     exploration_noise: 0.1
 
 training:
   num_steps: 10000
+  num_epochs: null
   batch_size: 8
   learning_rate: 0.0003
   log_interval: 50
@@ -22,9 +22,14 @@ training:
   checkpoint_dir: checkpoints_auto
 
 dataset:
-  source: local_file
+  source: localparquet
+  parquet:
+    file: "data/output.parquet"
+    column: "Joke"
   data_dir: data
-  local_file: "data/tiny_shakespeare.txt"
+  huggingface: null
+  tokenizer_path: "data/tokenizer.json"
+  max_items: null
 
 inference:
   max_tokens: 500
@@ -37,9 +42,19 @@ backend:
 curriculum:
   warmup_steps: 1000
   specialization_steps: 5000
+  warmup_epsilon: 1.0
+  specialization_epsilon_start: 0.3
+  specialization_epsilon_end: 0.05
+  maturity_epsilon: 0.01
   balance_weight: 0.1
   efficiency_weight: 0.05
   z_loss_weight: 0.001
+  warmup_balance_weight: 0.0
+  specialization_balance_weight: 0.1
+  maturity_balance_weight: 0.05
+  warmup_efficiency_weight: 0.0
+  specialization_efficiency_weight: 0.0
+  maturity_efficiency_weight: 0.1
 
 device_placement:
   pool: "Cpu"
